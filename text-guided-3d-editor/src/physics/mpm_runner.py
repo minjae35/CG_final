@@ -52,13 +52,36 @@ def run_simulation(
     if not sim_py.is_file():
         raise FileNotFoundError(sim_py)
 
+    # PhysGaussian expects `--model_path` to point at the 3DGS *model directory*
+    # containing `point_cloud/iteration_*/point_cloud.ply`. Our pipeline often
+    # passes the PLY path directly, so normalize it here.
+    mp = Path(model_path)
+    if mp.is_file() and mp.suffix.lower() == ".ply":
+        # <scene>/point_cloud/iteration_x/point_cloud.ply -> <scene>
+        try:
+            mp = mp.parents[2]
+        except IndexError:
+            pass
+
+    frames_dir = out / "frames"
+    # Normalize to Mode-A-style layout: frames/ + videos/
+    # Keep legacy compatibility with older runs that used video/.
+    video_dir = out / "videos"
+    legacy_video_dir = out / "video"
+
+    # PhysGaussian (this repo's `gs_simulation.py`) writes PNG frames directly
+    # under `--output_path` and writes `output.mp4` into the same folder.
+    # So: pass frames_dir to PhysGaussian so frames land in <out>/frames/,
+    # then move frames_dir/output.mp4 → <out>/videos/output.mp4.
+    phys_out = frames_dir
+
     cmd = [
         sys.executable,
         str(sim_py),
         "--model_path",
-        str(model_path),
+        str(mp),
         "--output_path",
-        str(out),
+        str(phys_out),
         "--config",
         str(config_path),
     ]
@@ -66,15 +89,14 @@ def run_simulation(
         cmd.append("--render_img")
     if compile_video:
         cmd.append("--compile_video")
-    if camera_scene_path:
-        cmd.extend(["--camera_scene_path", str(camera_scene_path)])
+    # NOTE: Upstream PhysGaussian `gs_simulation.py` in this repo does not accept
+    # `--camera_scene_path`. Rendering/compilation is driven by the sim config.
+    # Keep the parameter for backward compatibility, but do not forward it.
     if save_obj_centroid or save_obj_tracks_for_debug:
         cmd.append("--save_obj_centroid")
     if save_obj_gauss_xyz or save_obj_tracks_for_debug:
         cmd.append("--save_obj_gauss_xyz")
 
-    frames_dir = out / "frames"
-    video_dir = out / "video"
     if render_img and frames_dir.exists():
         shutil.rmtree(frames_dir)
     backup_path: Path | None = None
@@ -89,14 +111,31 @@ def run_simulation(
         env["PHYSGAUSSIAN_TAICHI_DEVICE_MEMORY_GB"] = str(float(taichi_device_memory_gb))
     subprocess.run(cmd, check=True, cwd=pg, env=env, timeout=86400)
 
-    # PhysGaussian writes frames under <out>/frames/ and video to <out>/video/output.mp4
-    primary = out / "video" / "output.mp4"
+    # Normalize all variants to <out>/videos/output.mp4 so downstream paths stay consistent.
+    primary = video_dir / "output.mp4"
+    phys_mp4 = frames_dir / "output.mp4"
+    if phys_mp4.is_file():
+        video_dir.mkdir(parents=True, exist_ok=True)
+        _backup_existing_video(video_dir)
+        phys_mp4.replace(primary)
+    # Backward compatibility: some variants may still write to legacy paths.
     legacy_root = out / "output.mp4"
+    legacy_video_primary = legacy_video_dir / "output.mp4"
+    if legacy_root.is_file() and not primary.is_file():
+        video_dir.mkdir(parents=True, exist_ok=True)
+        _backup_existing_video(video_dir)
+        legacy_root.replace(primary)
+    if legacy_video_primary.is_file() and not primary.is_file():
+        video_dir.mkdir(parents=True, exist_ok=True)
+        _backup_existing_video(video_dir)
+        legacy_video_primary.replace(primary)
     if playback_seconds and frames_dir.is_dir():
         frames = sorted(frames_dir.glob("*.png"))
         if frames:
             fps = max(1.0, len(frames) / float(playback_seconds))
             # HD cap + Main@L4.0 + faststart — plays in most players (full 3K High@L5.x often won't).
+            video_dir.mkdir(parents=True, exist_ok=True)
+            _backup_existing_video(video_dir)
             subprocess.run(
                 [
                     "ffmpeg",
@@ -105,7 +144,8 @@ def run_simulation(
                     "-i",
                     str(frames_dir / "%04d.png"),
                     "-vf",
-                    "scale='min(1280,iw)':-2",
+                    # Keep width ≤ 1280 and force even dimensions for H.264/yuv420p.
+                    "scale='trunc(min(1280,iw)/2)*2':-2",
                     "-c:v",
                     "libx264",
                     "-preset",
@@ -128,6 +168,4 @@ def run_simulation(
             )
     if primary.is_file():
         return str(primary)
-    if legacy_root.is_file():
-        return str(legacy_root)
     raise FileNotFoundError(f"PhysGaussian did not produce a video at {primary}")

@@ -101,6 +101,30 @@ class PhysicsConfig(BaseModel):
     # (closer to 1) = less velocity damping in PhysGaussian = longer visible oscillation.
     mode_a_jelly_E: float | None = None
     mode_a_jelly_grid_v_damping_scale: float | None = None
+    # mode-b MPM in-place jelly (scene object selection): support from selection + COM pin in PhysGaussian.
+    mode_b_support_contact_percentile: float = 92.0
+    mode_b_pin_initial_com: bool = True
+    # False = fix COM in X,Y,Z (furniture won't slowly drift/lean sideways). True only if you want horizontal slosh.
+    mode_b_pin_com_vertical_only: bool = False
+    mode_b_pin_zero_mean_velocity_gs: bool = False
+    mode_b_mpm_in_place_shear_wobble: bool = False
+    mode_b_jelly_gravity_mult: float = 0.24
+    # Furniture: stiffer than toy jelly; shear off by default (avoids twist/splay).
+    mode_b_jelly_E: float | None = 200000.0
+    mode_b_jelly_grid_v_damping_scale: float | None = 0.99990
+    mode_b_shear_wobble_velocity: float = 0.05
+    mode_b_shear_wobble_end_time: float = 0.08
+    # Each frame: x = x_rest + r*(x_mpm - x_rest) on visual Gaussians (0.88≈12% pull-back).
+    mode_b_mpm_displacement_retention: float | None = 0.88
+    # Render: keep 3DGS ellipsoid shape from sim t=0 (MPM F often spikes splats into needles).
+    mode_b_render_freeze_gaussian_cov: bool = True
+    # Strip rigid translation+rotation from visual particles each frame; keep non-rigid MPM residual (in-place jelly).
+    mode_b_mpm_kabsch_rigid_strip: bool = True
+    mode_b_mpm_kabsch_elastic_amp: float = 1.0
+    # In MPM space after shift2center111, larger Y ≈ feet (floor contact). Snap that band to rest each frame + zero v (stops hinge/slow tilt while top wobbles).
+    mode_b_mpm_anchor_feet_y_percentile: float | None = 88.0
+    # Tighter AABB around selection for mode-b (still need index filter in PhysGaussian).
+    mode_b_sim_area_margin: float | None = 0.2
 
 
 class EvaluationConfig(BaseModel):

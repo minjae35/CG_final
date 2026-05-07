@@ -56,6 +56,14 @@ def generate_phys_config(
     wobble_end_time: float = 0.04,
     sim_area_margin: float = 0.2,
     material_overrides: dict[str, Any] | None = None,
+    pin_initial_com_mpm: bool = False,
+    pin_com_vertical_only: bool = False,
+    pin_zero_mean_velocity_gs: bool = False,
+    mode_b_mpm_displacement_retention: float | None = None,
+    mode_b_render_freeze_gaussian_cov: bool = False,
+    mode_b_mpm_kabsch_rigid_strip: bool = False,
+    mode_b_mpm_kabsch_elastic_amp: float = 1.0,
+    mode_b_mpm_anchor_feet_y_percentile: float | None = None,
 ) -> tuple[str, list[float]]:
     output_path = Path(output_path)
     preset = get_preset(material_name)
@@ -181,6 +189,26 @@ def generate_phys_config(
         base["simulate_indices_npy"] = str(Path(simulate_indices_npy).resolve())
     if subtract_rigid_drift:
         base["subtract_rigid_drift"] = True
+    if pin_initial_com_mpm:
+        base["pin_initial_com_mpm"] = True
+    if pin_com_vertical_only:
+        base["pin_com_vertical_only"] = True
+    if pin_zero_mean_velocity_gs:
+        base["pin_zero_mean_velocity_gs"] = True
+    if (
+        mode_b_mpm_displacement_retention is not None
+        and 0.0 <= float(mode_b_mpm_displacement_retention) < 1.0
+    ):
+        base["mode_b_mpm_displacement_retention"] = float(mode_b_mpm_displacement_retention)
+    if mode_b_render_freeze_gaussian_cov:
+        base["mode_b_render_freeze_gaussian_cov"] = True
+    if mode_b_mpm_kabsch_rigid_strip:
+        base["mode_b_mpm_kabsch_rigid_strip"] = True
+        base["mode_b_mpm_kabsch_elastic_amp"] = float(mode_b_mpm_kabsch_elastic_amp)
+    if mode_b_mpm_anchor_feet_y_percentile is not None:
+        ap = float(mode_b_mpm_anchor_feet_y_percentile)
+        if 0.0 < ap < 100.0:
+            base["mode_b_mpm_anchor_feet_y_percentile"] = ap
     if world_up is not None:
         base["mpm_space_vertical_upward_axis"] = [float(c) for c in world_up]
     base.update(preset)

@@ -68,6 +68,24 @@ physics:
   # mode-a + jelly MPM: softer + less grid damping → more jiggle on floor contact (mode-b unchanged)
   mode_a_jelly_E: 48000
   mode_a_jelly_grid_v_damping_scale: 0.99988
+  # mode-b: jelly stays on the *selected* object's support (high-Y percentile) + COM pin in PhysGaussian.
+  mode_b_support_contact_percentile: 92.0
+  mode_b_pin_initial_com: true
+  mode_b_pin_com_vertical_only: false
+  mode_b_pin_zero_mean_velocity_gs: false
+  mode_b_mpm_in_place_shear_wobble: true
+  mode_b_jelly_gravity_mult: 0.24
+  mode_b_jelly_E: 200000
+  mode_b_jelly_grid_v_damping_scale: 0.99990
+  mode_b_shear_wobble_velocity: 0.05
+  mode_b_shear_wobble_end_time: 0.08
+  mode_b_sim_area_margin: 0.2
+  mode_b_mpm_displacement_retention: 0.88
+  mode_b_render_freeze_gaussian_cov: true
+  mode_b_mpm_kabsch_rigid_strip: true
+  mode_b_mpm_kabsch_elastic_amp: 1.0
+  # Larger MPM Y ≈ floor/feet; locks that band to rest (reduces slow hinge tilt).
+  mode_b_mpm_anchor_feet_y_percentile: 88.0
 
 evaluation:
   test_views: [0, 5, 10, 15, 20]

@@ -74,14 +74,14 @@ def render_kinematic_wobble_sequence(
     wobble_bottom_pin: float = 0.24,
     track_debug: bool = False,
 ) -> str:
-    """Write ``sim_run/frames/*.png`` and ``sim_run/video/output.mp4`` (same layout as PhysGaussian)."""
+    """Write ``sim_run/frames/*.png`` and ``sim_run/videos/output.mp4``."""
     if not torch.cuda.is_available():
         raise RuntimeError("Kinematic wobble rendering requires CUDA.")
 
     merged_ply = Path(merged_ply).resolve()
     sim_run = Path(sim_run).resolve()
     frames_dir = sim_run / "frames"
-    video_dir = sim_run / "video"
+    video_dir = sim_run / "videos"
     frames_dir.mkdir(parents=True, exist_ok=True)
     video_dir.mkdir(parents=True, exist_ok=True)
     if frames_dir.exists():

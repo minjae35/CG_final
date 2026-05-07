@@ -281,7 +281,7 @@ def run_mesh_rigid_overlay_sequence(
     depth_bias: float = 0.02,
     mesh_skin_k: int = 12,
 ) -> Path:
-    """Overwrite ``sim_run/frames/*.png`` with base-GS + mesh, then re-encode ``video/output.mp4``.
+    """Overwrite ``sim_run/frames/*.png`` with base-GS + mesh, then re-encode ``videos/output.mp4``.
 
     If ``sim_run/mesh_gauss_xyz/gauss_XXXX.npy`` exists (PhysGaussian ``--save_obj_gauss_xyz``), each mesh
     vertex follows a **KNN soft skinning** of object Gaussians so **jelly deformation** from the MPM sim
@@ -373,12 +373,12 @@ def reencode_sim_run_video(
     frame_dt: float,
     playback_seconds: float | None = None,
 ) -> Path:
-    """Rebuild ``video/output.mp4`` from ``frames/%04d.png`` (backs up existing mp4)."""
+    """Rebuild ``videos/output.mp4`` from ``frames/%04d.png`` (backs up existing mp4)."""
     from datetime import datetime
 
     sim_run = Path(sim_run)
     frames_dir = sim_run / "frames"
-    video_dir = sim_run / "video"
+    video_dir = sim_run / "videos"
     video_dir.mkdir(parents=True, exist_ok=True)
     frames = sorted(frames_dir.glob("*.png"))
     if not frames:

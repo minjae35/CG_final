@@ -34,6 +34,7 @@ from generation.mesh_to_gaussian import (
     stage_external_mesh_into_gen_dir,
 )
 from physics.config_generator import default_template_dir, generate_phys_config
+from physics.mode_b_jelly import estimate_mode_b_support_contact_y
 from physics.mode_b_selection import (
     filter_expanded_to_shell_around_surface,
     filter_indices_by_opacity_logit,
@@ -244,6 +245,11 @@ def mode_b(
         "--debug-selection/--no-debug-selection",
         help="Save bbox indices, selected-only PLY, selected_indices.npy, and optional CUDA frame-0 renders.",
     ),
+    clean_debug_dir: bool = typer.Option(
+        True,
+        "--clean-debug-dir/--no-clean-debug-dir",
+        help="With --debug-selection: delete <mode_b_out>/debug before writing new debug artifacts (keeps only the latest run).",
+    ),
     shell_radius_m: float | None = typer.Option(
         None,
         "--shell-radius-m",
@@ -345,9 +351,18 @@ def mode_b(
 
     mode_b_out = cfg.resolve(cfg.paths.sim_output) / "mode_b_jelly"
     mode_b_out.mkdir(parents=True, exist_ok=True)
+    if debug_selection and clean_debug_dir:
+        shutil.rmtree(mode_b_out / "debug", ignore_errors=True)
     p_sel_cam_file = mode_b_out / "debug_selection" / "best_camera_index.txt"
+    legacy_sel_cam_file = mode_b_out / "debug" / "best_camera_index.txt"
     forced_overlay_cam: int | None = (
-        int(camera_index) if camera_index is not None else _read_training_cam_index_txt(p_sel_cam_file)
+        int(camera_index)
+        if camera_index is not None
+        else (
+            _read_training_cam_index_txt(p_sel_cam_file)
+            if _read_training_cam_index_txt(p_sel_cam_file) is not None
+            else _read_training_cam_index_txt(legacy_sel_cam_file)
+        )
     )
     camera_audit: list[str] = []
 
@@ -692,6 +707,11 @@ def mode_b(
             if camera_index is not None
             else str(p_sel_cam_file)
         )
+    else:
+        # Persist the chosen camera so future runs can stay view-consistent without
+        # passing --camera-index explicitly.
+        p_sel_cam_file.parent.mkdir(parents=True, exist_ok=True)
+        p_sel_cam_file.write_text(f"{render_camera_index}\n", encoding="utf-8")
     console.print(
         f"[mode-b] final video / MPM camera_index=[bold]{render_camera_index}[/]  "
         f"(getTrainCameras order)  resolved_from={cam_src}"
@@ -771,6 +791,42 @@ def mode_b(
     gc.collect()
     _log_cuda_memory_line(console, "[mode-b] PhysGaussian 직전 GPU")
     _maybe_cuda_empty()
+    # Mode-b jelly: support plane from the *selection* (+Y-down → high-Y percentile = contact).
+    # PhysGaussian pins COM each frame (see gs_simulation + phys JSON) so the desk
+    # stays in place while MPM adds local deformation / shear wobble BCs.
+    support_y = estimate_mode_b_support_contact_y(
+        pos,
+        idx,
+        contact_percentile=float(cfg.physics.mode_b_support_contact_percentile),
+    )
+    sim_margin = (
+        float(cfg.physics.mode_b_sim_area_margin)
+        if cfg.physics.mode_b_sim_area_margin is not None
+        else float(cfg.physics.sim_area_margin)
+    )
+    mat_b: dict[str, float] = {}
+    if cfg.physics.mode_b_jelly_E is not None:
+        mat_b["E"] = float(cfg.physics.mode_b_jelly_E)
+    if cfg.physics.mode_b_jelly_grid_v_damping_scale is not None:
+        mat_b["grid_v_damping_scale"] = float(cfg.physics.mode_b_jelly_grid_v_damping_scale)
+    console.print(
+        f"[mode-b] jelly in-place: support_contact_y={support_y:.4f} "
+        f"(pctl={cfg.physics.mode_b_support_contact_percentile})  "
+        f"selected bbox min={lo_i.tolist()} max={hi_i.tolist()}  "
+        f"world_down=+scene_Y  mpm_world_up=(0,-1,0)  "
+        f"pin_com={cfg.physics.mode_b_pin_initial_com}  "
+        f"pin_vertical_only={cfg.physics.mode_b_pin_com_vertical_only}  "
+        f"shear_wobble={cfg.physics.mode_b_mpm_in_place_shear_wobble}  "
+        f"sim_margin={sim_margin}  "
+        f"E={mat_b.get('E', 'preset')}  "
+        f"shear_v={cfg.physics.mode_b_shear_wobble_velocity}  "
+        f"shear_t={cfg.physics.mode_b_shear_wobble_end_time}s  "
+        f"disp_retention={cfg.physics.mode_b_mpm_displacement_retention}  "
+        f"kabsch_strip={cfg.physics.mode_b_mpm_kabsch_rigid_strip}  "
+        f"kabsch_amp={cfg.physics.mode_b_mpm_kabsch_elastic_amp}  "
+        f"anchor_feet_y_pctl={cfg.physics.mode_b_mpm_anchor_feet_y_percentile}  "
+        f"freeze_cov_render={cfg.physics.mode_b_render_freeze_gaussian_cov}"
+    )
     generate_phys_config(
         idx,
         pos,
@@ -781,12 +837,38 @@ def mode_b(
         frame_num=sim_frame_num,
         frame_dt=cfg.physics.frame_dt,
         substep_dt=cfg.physics.substep_dt,
-        gravity=float(cfg.physics.gravity) * float(cfg.physics.gravity_scale),
+        gravity=float(cfg.physics.gravity)
+        * float(cfg.physics.gravity_scale)
+        * float(cfg.physics.mode_b_jelly_gravity_mult),
         camera_index=render_camera_index,
         simulate_indices_npy=sim_indices_path,
-        subtract_rigid_drift=True,
+        subtract_rigid_drift=False,
+        floor_y=support_y,
+        world_up=(0.0, -1.0, 0.0),
+        floor_collider=True,
+        floor_friction=float(cfg.physics.floor_friction),
+        in_place_wobble=bool(cfg.physics.mode_b_mpm_in_place_shear_wobble),
+        wobble_velocity=float(cfg.physics.mode_b_shear_wobble_velocity),
+        wobble_end_time=float(cfg.physics.mode_b_shear_wobble_end_time),
+        pin_initial_com_mpm=bool(cfg.physics.mode_b_pin_initial_com),
+        pin_com_vertical_only=bool(cfg.physics.mode_b_pin_com_vertical_only),
+        pin_zero_mean_velocity_gs=bool(cfg.physics.mode_b_pin_zero_mean_velocity_gs),
+        mode_b_mpm_displacement_retention=(
+            float(cfg.physics.mode_b_mpm_displacement_retention)
+            if cfg.physics.mode_b_mpm_displacement_retention is not None
+            else None
+        ),
+        mode_b_render_freeze_gaussian_cov=bool(cfg.physics.mode_b_render_freeze_gaussian_cov),
+        mode_b_mpm_kabsch_rigid_strip=bool(cfg.physics.mode_b_mpm_kabsch_rigid_strip),
+        mode_b_mpm_kabsch_elastic_amp=float(cfg.physics.mode_b_mpm_kabsch_elastic_amp),
+        mode_b_mpm_anchor_feet_y_percentile=(
+            float(cfg.physics.mode_b_mpm_anchor_feet_y_percentile)
+            if cfg.physics.mode_b_mpm_anchor_feet_y_percentile is not None
+            else None
+        ),
+        material_overrides=mat_b if mat_b else None,
         enable_internal_particle_fill=cfg.physics.enable_mpm_particle_filling,
-        sim_area_margin=cfg.physics.sim_area_margin,
+        sim_area_margin=sim_margin,
         particle_filling={
             "n_grid": min(50, sim_n_grid),
             "density_threshold": 3.0,
@@ -804,6 +886,9 @@ def mode_b(
         playback_seconds=cfg.physics.compile_video_playback_sec,
         taichi_device_memory_gb=_taichi_gb,
     )
+    dbg_js = mode_b_out / "frames" / "mode_b_mpm_debug.json"
+    if dbg_js.is_file():
+        console.print(f"[mode-b] MPM COM / drift log: [cyan]{dbg_js}[/]")
     console.print(f"Video: [green]{vid}[/]")
 
 
