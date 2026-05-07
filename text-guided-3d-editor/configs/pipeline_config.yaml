@@ -1,0 +1,80 @@
+# PRD v2 §3 + T4 smoke options
+scene:
+  dataset_url: "http://storage.googleapis.com/gresearch/refraw360/360_v2.zip"
+  data_root: "data/mipnerf360"
+  scene_name: "room"
+  model_output: "output/base_scene_smoke"
+  training_iterations: 30000
+  training_iterations_low: 8000  # smoke / T4-friendly
+
+reconstruction:
+  render_width: 640
+  render_height: 480
+  render_view_stride: 10
+
+segmentation:
+  grounding_dino_checkpoint: "submodules/Grounded-SAM-2/gdino_checkpoints/groundingdino_swinb_cogcoor.pth"
+  grounding_dino_config: "submodules/Grounded-SAM-2/grounding_dino/groundingdino/config/GroundingDINO_SwinB_cfg.py"
+  sam2_checkpoint: "submodules/Grounded-SAM-2/checkpoints/sam2.1_hiera_large.pt"
+  sam2_config: "submodules/Grounded-SAM-2/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+  box_threshold: 0.3
+  text_threshold: 0.25
+  multi_view_count: 4
+  consensus_min_votes: 2
+  inference_width: 640
+  inference_height: 480
+  segmentation_device: cuda
+  mask_stride: 2
+  mask_3d_distance_threshold_m: 0.07
+  mask_use_depth_consistency: true
+  mask_depth_tolerance_abs_m: 0.035
+  mask_depth_tolerance_rel: 0.03
+  mask_knn: 12
+  mask_pixel_tolerance_px: 5.0
+  mask_min_votes: 2
+  mask_erode_iters: 0
+  mode_b_expand_bbox_margin_ratio: 0.06
+  mode_b_expand_bbox_z_margin_ratio: 0.10
+
+generation:
+  stable_diffusion_model: "runwayml/stable-diffusion-v1-5"
+  sds_steps: 200         # placement / physics 검증용 임시값. 형상 품질 만족시 1000+로 다시 올린다.
+  sds_steps_low: 200
+  guidance_scale: 100.0
+  object_scale_factor: 0.016  # slightly larger duck footprint on the rug.
+
+placement:
+  surface_search_radius: 0.5
+  opacity_threshold: 0.5
+
+physics:
+  n_grid: 100
+  n_grid_low: 40       # used with mode-b --smoke (MPM grid); lower = less Taichi/Warp VRAM
+  substep_dt: 0.0002    # smaller = stabler MPM on T4 with stiff rubber / many splats
+  frame_dt: 0.01
+  frame_num: 200       # shorter sim = less long-run creep / spread on the rug
+  frame_num_test: 30   # kinematic --smoke length (~1 s)
+  taichi_device_memory_gb: 4.0   # PhysGaussian ti.init arena; T4 often 4–5
+  mode_b_mpm_smoke_frames: 48   # mode-b MPM frame count when --smoke (not kinematic)
+  gravity: -9.8
+  gravity_scale: 0.62  # gentler collapse while still in floor contact (rubber toy)
+  floor_friction: 0.40 # lower tangential stick that can shear/spread jelly-like material
+  sim_area_margin: 0.38
+  wobble_velocity: 0.058
+  wobble_end_time: 0.075
+  placement_floor_contact_y_eps: 0.0  # add tiny +y only if you need MPM epsilon (usually 0)
+  enable_mpm_particle_filling: false
+  compile_video_playback_sec: 10.0
+  # mode-a + jelly MPM: softer + less grid damping → more jiggle on floor contact (mode-b unchanged)
+  mode_a_jelly_E: 48000
+  mode_a_jelly_grid_v_damping_scale: 0.99988
+
+evaluation:
+  test_views: [0, 5, 10, 15, 20]
+  lpips_net: "alex"
+
+paths:
+  merged_output: "output/merged_scenes"
+  sim_output: "output/sim_results"
+  generated_objects: "output/generated_objects"
+  eval_output: "output/eval"

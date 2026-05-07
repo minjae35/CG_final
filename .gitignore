@@ -1,0 +1,34 @@
+# Pipeline outputs: 3DGS, renders, simulation, etc.
+text-guided-3d-editor/output/
+
+# Mip-NeRF / COLMAP data stored in-repo
+text-guided-3d-editor/data/
+
+# Documents
+documents/
+
+# CLAUDE.md
+CLAUDE.md
+
+# AGENTS.md
+AGENTS.md
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# LaTeX build artifacts (e.g. documents/mid-eval-latex/)
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+
+# Cursor IDE local settings
+.cursor/

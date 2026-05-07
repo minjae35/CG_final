@@ -1,0 +1,12 @@
+[submodule "text-guided-3d-editor/submodules/gaussian-splatting"]
+	path = text-guided-3d-editor/submodules/gaussian-splatting
+	url = https://github.com/graphdeco-inria/gaussian-splatting.git
+[submodule "text-guided-3d-editor/submodules/dreamgaussian"]
+	path = text-guided-3d-editor/submodules/dreamgaussian
+	url = https://github.com/dreamgaussian/dreamgaussian.git
+[submodule "text-guided-3d-editor/submodules/Grounded-SAM-2"]
+	path = text-guided-3d-editor/submodules/Grounded-SAM-2
+	url = https://github.com/IDEA-Research/Grounded-SAM-2.git
+[submodule "text-guided-3d-editor/submodules/PhysGaussian"]
+	path = text-guided-3d-editor/submodules/PhysGaussian
+	url = https://github.com/XPandora/PhysGaussian.git

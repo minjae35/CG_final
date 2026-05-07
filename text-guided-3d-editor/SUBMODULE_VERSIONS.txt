@@ -1,0 +1,6 @@
+# git rev-parse HEAD (pin for reproducibility)
+gaussian-splatting: 54c035f7834b564019656c3e3fcc3646292f727d
+dreamgaussian: 69a3c7065d580da124dc0bf2e9a21cd3b7973b35
+Grounded-SAM-2: b7a9c29f196edff0eb54dbe14588d7ae5e3dde28
+PhysGaussian: 8339ed6aa2cd5d50e1001a254a3d95aea678a956
+# Local patch: gs_simulation.py writes PNG frames to <output>/frames/ and MP4 to <output>/video/output.mp4 (upstream uses flat <output>/).

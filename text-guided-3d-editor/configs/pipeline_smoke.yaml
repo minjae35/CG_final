@@ -1,0 +1,81 @@
+# Smoke config: fast 8k iters + smoke physics defaults.
+# 3DGS: `--smoke` → model_output_smoke; full train → model_output_full (same keys as pipeline_config.yaml).
+scene:
+  dataset_url: "http://storage.googleapis.com/gresearch/refraw360/360_v2.zip"
+  data_root: "/home/bgh1225/data/mipnerf360_extract"
+  scene_name: "room"
+  model_output_full: "output/base_scene_full"
+  model_output_smoke: "output/base_scene_smoke"
+  training_iterations: 30000
+  training_iterations_low: 8000  # smoke / T4-friendly
+
+reconstruction:
+  render_width: 640
+  render_height: 480
+  render_view_stride: 10
+  gs_scene_resolution: 4
+  gs_scene_data_device: cpu
+
+segmentation:
+  grounding_dino_checkpoint: "submodules/Grounded-SAM-2/gdino_checkpoints/groundingdino_swinb_cogcoor.pth"
+  sam2_checkpoint: "submodules/Grounded-SAM-2/checkpoints/sam2.1_hiera_large.pt"
+  sam2_config: "submodules/Grounded-SAM-2/sam2/configs/sam2.1/sam2.1_hiera_l.yaml"
+  box_threshold: 0.3
+  text_threshold: 0.25
+  multi_view_count: 4
+  consensus_min_votes: 2
+  inference_width: 640
+  inference_height: 480
+  segmentation_device: cuda
+
+generation:
+  # Smoke defaults: SD1.5 to avoid SD3 VRAM OOM on T4.
+  stable_diffusion_model: "runwayml/stable-diffusion-v1-5"
+  guidance_backend: sd15
+  sds_steps: 500
+  sds_steps_low: 200
+  guidance_scale: 100.0
+  object_scale_factor: 0.08
+
+placement:
+  surface_search_radius: 0.1
+  opacity_threshold: 0.5
+
+physics:
+  n_grid: 80
+  n_grid_low: 32
+  substep_dt: 0.0004
+  frame_dt: 0.01
+  frame_num: 120
+  frame_num_test: 180
+  taichi_device_memory_gb: 4.0
+  mode_b_mpm_smoke_frames: 48
+  gravity: -9.8
+  smoke_sim_frames: 180
+  smoke_substep_dt: 0.0002
+  smoke_gravity_scale: 0.22
+  smoke_jelly_E: 6500.0
+  smoke_snow_E: 80000.0
+  smoke_metal_E: 150000.0
+  smoke_particle_filling: false
+  compile_video_playback_sec: 10.0
+  mode_b_selection_dilate_m: 0.12
+  mode_b_selection_dilate_passes: 2
+  mode_b_subtract_rigid_drift: true
+  # Default MPM material. Prefer per-material configs: pipeline_smoke_jelly|sand|snow.yaml
+  mode_b_mpm_material: jelly
+
+evaluation:
+  test_views: [0, 5, 10, 15, 20]
+  lpips_net: "alex"
+
+paths:
+  merged_output: "output/merged_scenes"
+  sim_output: "output/sim_results"
+  # Default sim output folder; split experiments via --sim-output-subdir in scripts.
+  mode_b_output_subdir: "mode_b_smoke"
+  generated_objects: "output/generated_objects"
+  eval_output: "output/eval"
+
+# If iteration_8000 is missing: train --smoke --config configs/pipeline_smoke.yaml
+# Mode-b by material: --config configs/pipeline_smoke_jelly.yaml | _sand.yaml | _snow.yaml

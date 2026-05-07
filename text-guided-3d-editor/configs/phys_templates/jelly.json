@@ -1,0 +1,10 @@
+{
+  "material": "jelly",
+  "E": 120000,
+  "nu": 0.4,
+  "density": 500,
+  "opacity_threshold": 0.02,
+  "rotation_degree": [0.0],
+  "rotation_axis": [0],
+  "grid_v_damping_scale": 0.999
+}

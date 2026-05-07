@@ -1,0 +1,11 @@
+{
+  "material": "snow",
+  "E": 140000,
+  "nu": 0.3,
+  "density": 400,
+  "opacity_threshold": 0.02,
+  "rotation_degree": [0.0],
+  "rotation_axis": [0],
+  "grid_v_damping_scale": 0.9999,
+  "yield_stress": 80.0
+}

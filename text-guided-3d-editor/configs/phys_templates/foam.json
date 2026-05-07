@@ -1,0 +1,11 @@
+{
+  "material": "foam",
+  "E": 1000,
+  "nu": 0.25,
+  "density": 200,
+  "opacity_threshold": 0.02,
+  "rotation_degree": [0.0],
+  "rotation_axis": [0],
+  "grid_v_damping_scale": 0.9999,
+  "yield_stress": 20.0
+}

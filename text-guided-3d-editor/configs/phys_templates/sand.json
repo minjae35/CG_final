@@ -1,0 +1,11 @@
+{
+  "material": "sand",
+  "E": 10000,
+  "nu": 0.2,
+  "density": 1500,
+  "opacity_threshold": 0.02,
+  "rotation_degree": [0.0],
+  "rotation_axis": [0],
+  "grid_v_damping_scale": 0.9999,
+  "yield_stress": 50.0
+}
