@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import os
 import shutil
 import sys
@@ -788,6 +789,13 @@ def mode_b(
     sim_cfg = mode_b_out / "phys_config.json"
     sim_n_grid = int(cfg.physics.n_grid_low if smoke else cfg.physics.n_grid)
     sim_frame_num = int(cfg.physics.mode_b_mpm_smoke_frames if smoke else cfg.physics.frame_num)
+    # Sustained wobble drives MPM physics time → match requested motion horizon to video/sim length.
+    if cfg.physics.mode_b_phys_sustained_wobble and not smoke:
+        motion_s = cfg.physics.mode_b_phys_wobble_motion_seconds
+        if motion_s is None:
+            motion_s = float(cfg.physics.compile_video_playback_sec)
+        tgt = int(math.ceil(float(motion_s) / float(cfg.physics.frame_dt)) + 2)
+        sim_frame_num = max(sim_frame_num, tgt)
     gc.collect()
     _log_cuda_memory_line(console, "[mode-b] PhysGaussian 직전 GPU")
     _maybe_cuda_empty()
@@ -817,6 +825,16 @@ def mode_b(
         f"pin_com={cfg.physics.mode_b_pin_initial_com}  "
         f"pin_vertical_only={cfg.physics.mode_b_pin_com_vertical_only}  "
         f"shear_wobble={cfg.physics.mode_b_mpm_in_place_shear_wobble}  "
+        f"shear_full_vol={cfg.physics.mode_b_shear_wobble_full_volume}  "
+        f"sust_phys={cfg.physics.mode_b_phys_sustained_wobble}  "
+        f"sust_hz={cfg.physics.mode_b_phys_wobble_frequency_hz}  "
+        f"vx_peak={cfg.physics.mode_b_phys_wobble_velocity_peak_x or cfg.physics.mode_b_phys_wobble_velocity_peak}  "
+        f"vy_peak={cfg.physics.mode_b_phys_wobble_velocity_peak_y}  "
+        f"vz_peak={cfg.physics.mode_b_phys_wobble_velocity_peak_z}  "
+        f"d12=({cfg.physics.mode_b_phys_wobble_velocity_peak_diag1},"
+        f"{cfg.physics.mode_b_phys_wobble_velocity_peak_diag2})  "
+        f"twist_peak={cfg.physics.mode_b_phys_wobble_velocity_peak_twist}  "
+        f"frames={sim_frame_num}  "
         f"sim_margin={sim_margin}  "
         f"E={mat_b.get('E', 'preset')}  "
         f"shear_v={cfg.physics.mode_b_shear_wobble_velocity}  "
@@ -825,6 +843,8 @@ def mode_b(
         f"kabsch_strip={cfg.physics.mode_b_mpm_kabsch_rigid_strip}  "
         f"kabsch_amp={cfg.physics.mode_b_mpm_kabsch_elastic_amp}  "
         f"anchor_feet_y_pctl={cfg.physics.mode_b_mpm_anchor_feet_y_percentile}  "
+        f"shear_symmetric_lr={cfg.physics.mode_b_mpm_shear_symmetric_lr_split}  "
+        f"tilt_diag={cfg.physics.mode_b_mpm_tilt_diagnostics}  "
         f"freeze_cov_render={cfg.physics.mode_b_render_freeze_gaussian_cov}"
     )
     generate_phys_config(
@@ -850,6 +870,7 @@ def mode_b(
         in_place_wobble=bool(cfg.physics.mode_b_mpm_in_place_shear_wobble),
         wobble_velocity=float(cfg.physics.mode_b_shear_wobble_velocity),
         wobble_end_time=float(cfg.physics.mode_b_shear_wobble_end_time),
+        shear_wobble_full_volume=bool(cfg.physics.mode_b_shear_wobble_full_volume),
         pin_initial_com_mpm=bool(cfg.physics.mode_b_pin_initial_com),
         pin_com_vertical_only=bool(cfg.physics.mode_b_pin_com_vertical_only),
         pin_zero_mean_velocity_gs=bool(cfg.physics.mode_b_pin_zero_mean_velocity_gs),
@@ -866,6 +887,45 @@ def mode_b(
             if cfg.physics.mode_b_mpm_anchor_feet_y_percentile is not None
             else None
         ),
+        shear_symmetric_lr_split=bool(cfg.physics.mode_b_mpm_shear_symmetric_lr_split),
+        phys_sustained_wobble=bool(cfg.physics.mode_b_phys_sustained_wobble),
+        phys_wobble_frequency_hz=float(cfg.physics.mode_b_phys_wobble_frequency_hz),
+        phys_wobble_velocity_peak=float(cfg.physics.mode_b_phys_wobble_velocity_peak),
+        phys_wobble_velocity_peak_x=(
+            float(cfg.physics.mode_b_phys_wobble_velocity_peak_x)
+            if cfg.physics.mode_b_phys_wobble_velocity_peak_x is not None
+            else None
+        ),
+        phys_wobble_velocity_peak_y=float(cfg.physics.mode_b_phys_wobble_velocity_peak_y),
+        phys_wobble_phase_y_rad=float(cfg.physics.mode_b_phys_wobble_phase_y),
+        phys_wobble_band_amp_x=cfg.physics.mode_b_phys_wobble_band_amp_x,
+        phys_wobble_band_amp_y=cfg.physics.mode_b_phys_wobble_band_amp_y,
+        phys_wobble_band_vy_polarity=cfg.physics.mode_b_phys_wobble_band_vy_polarity,
+        phys_wobble_band_phase_y_offset_rad=cfg.physics.mode_b_phys_wobble_band_phase_y_offset_rad,
+        phys_wobble_velocity_peak_z=float(cfg.physics.mode_b_phys_wobble_velocity_peak_z),
+        phys_wobble_velocity_peak_diag1=float(cfg.physics.mode_b_phys_wobble_velocity_peak_diag1),
+        phys_wobble_velocity_peak_diag2=float(cfg.physics.mode_b_phys_wobble_velocity_peak_diag2),
+        phys_wobble_velocity_peak_twist=float(cfg.physics.mode_b_phys_wobble_velocity_peak_twist),
+        phys_wobble_phase_z_rad=float(cfg.physics.mode_b_phys_wobble_phase_z),
+        phys_wobble_phase_diag1_rad=float(cfg.physics.mode_b_phys_wobble_phase_diag1_rad),
+        phys_wobble_phase_diag2_rad=float(cfg.physics.mode_b_phys_wobble_phase_diag2_rad),
+        phys_wobble_phase_twist_rad=float(cfg.physics.mode_b_phys_wobble_phase_twist_rad),
+        phys_wobble_bundle_quad_phase_rad=cfg.physics.mode_b_phys_wobble_bundle_quad_phase_rad,
+        phys_wobble_bundle_band_phase_rad=cfg.physics.mode_b_phys_wobble_bundle_band_phase_rad,
+        phys_wobble_band_amp_z=cfg.physics.mode_b_phys_wobble_band_amp_z,
+        phys_wobble_band_amp_diag1=cfg.physics.mode_b_phys_wobble_band_amp_diag1,
+        phys_wobble_band_amp_diag2=cfg.physics.mode_b_phys_wobble_band_amp_diag2,
+        phys_wobble_band_amp_twist=cfg.physics.mode_b_phys_wobble_band_amp_twist,
+        phys_wobble_force_scale=float(cfg.physics.mode_b_phys_wobble_force_scale),
+        phys_wobble_decay_lambda_per_s=float(cfg.physics.mode_b_phys_wobble_decay_lambda_per_s),
+        phys_wobble_duration_s=(
+            float(cfg.physics.mode_b_phys_wobble_duration_s)
+            if cfg.physics.mode_b_phys_wobble_duration_s is not None
+            else None
+        ),
+        phys_wobble_ramp_time_s=float(cfg.physics.mode_b_phys_wobble_ramp_time_s),
+        mode_b_mpm_tilt_diagnostics=bool(cfg.physics.mode_b_mpm_tilt_diagnostics),
+        mode_b_mpm_tilt_top_y_percentile=float(cfg.physics.mode_b_mpm_tilt_top_y_percentile),
         material_overrides=mat_b if mat_b else None,
         enable_internal_particle_fill=cfg.physics.enable_mpm_particle_filling,
         sim_area_margin=sim_margin,
@@ -889,6 +949,9 @@ def mode_b(
     dbg_js = mode_b_out / "frames" / "mode_b_mpm_debug.json"
     if dbg_js.is_file():
         console.print(f"[mode-b] MPM COM / drift log: [cyan]{dbg_js}[/]")
+    tilt_js = mode_b_out / "frames" / "mode_b_mpm_tilt_series.json"
+    if tilt_js.is_file():
+        console.print(f"[mode-b] MPM tilt time-series + drift summary: [cyan]{tilt_js}[/]")
     console.print(f"Video: [green]{vid}[/]")
 
 

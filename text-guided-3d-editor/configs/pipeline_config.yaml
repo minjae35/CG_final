@@ -64,7 +64,7 @@ physics:
   wobble_end_time: 0.075
   placement_floor_contact_y_eps: 0.0  # add tiny +y only if you need MPM epsilon (usually 0)
   enable_mpm_particle_filling: false
-  compile_video_playback_sec: 10.0
+  compile_video_playback_sec: 5.0
   # mode-a + jelly MPM: softer + less grid damping → more jiggle on floor contact (mode-b unchanged)
   mode_a_jelly_E: 48000
   mode_a_jelly_grid_v_damping_scale: 0.99988
@@ -72,20 +72,60 @@ physics:
   mode_b_support_contact_percentile: 92.0
   mode_b_pin_initial_com: true
   mode_b_pin_com_vertical_only: false
-  mode_b_pin_zero_mean_velocity_gs: false
+  # Zero bulk velocity on visual Gaussians each frame — damp slow horizontal creep / bias after shear pulse.
+  mode_b_pin_zero_mean_velocity_gs: true
   mode_b_mpm_in_place_shear_wobble: true
   mode_b_jelly_gravity_mult: 0.24
   mode_b_jelly_E: 200000
   mode_b_jelly_grid_v_damping_scale: 0.99990
-  mode_b_shear_wobble_velocity: 0.05
-  mode_b_shear_wobble_end_time: 0.08
+  # Stronger / longer symmetric shear; full-height slabs (mode_b_shear_wobble_full_volume) excite legs too.
+  mode_b_shear_wobble_velocity: 0.12
+  mode_b_shear_wobble_end_time: 0.18
+  mode_b_shear_wobble_full_volume: true
+  # MPM Dirichlet: sinusoidal shear for full physics duration (see mode_b_phys_*). Not render-time.
+  mode_b_phys_sustained_wobble: true
+  mode_b_phys_wobble_frequency_hz: 1.35
+  mode_b_phys_wobble_velocity_peak: 0.2
+  mode_b_phys_wobble_velocity_peak_x: null
+  mode_b_phys_wobble_velocity_peak_y: 0.14
+  # π/2: vertical lags horizontal.
+  mode_b_phys_wobble_phase_y: 1.5708
+  mode_b_phys_wobble_band_amp_x: [1.1, 1.0, 0.95]
+  mode_b_phys_wobble_band_amp_y: [1.05, 0.65, 0.55]
+  mode_b_phys_wobble_band_vy_polarity: [1.0, 0.4, -0.88]
+  mode_b_phys_wobble_band_phase_y_offset_rad: [0.0, 0.14, -0.11]
+  # Z = depth (MDN space); diagonals in XZ; twist = position-dependent ω_y field.
+  mode_b_phys_wobble_velocity_peak_z: 0.12
+  mode_b_phys_wobble_velocity_peak_diag1: 0.14
+  mode_b_phys_wobble_velocity_peak_diag2: 0.14
+  mode_b_phys_wobble_velocity_peak_twist: 0.18
+  mode_b_phys_wobble_phase_z: 0.42
+  mode_b_phys_wobble_phase_diag1_rad: 0.78
+  mode_b_phys_wobble_phase_diag2_rad: 2.35
+  mode_b_phys_wobble_phase_twist_rad: 1.05
+  mode_b_phys_wobble_bundle_quad_phase_rad: [0.0, 0.55, 1.12, 1.7]
+  mode_b_phys_wobble_bundle_band_phase_rad: [0.0, 0.22, -0.16]
+  mode_b_phys_wobble_band_amp_z: [1.05, 0.95, 0.88]
+  mode_b_phys_wobble_band_amp_diag1: [1.05, 0.95, 0.9]
+  mode_b_phys_wobble_band_amp_diag2: [1.05, 0.95, 0.9]
+  mode_b_phys_wobble_band_amp_twist: [1.1, 1.0, 0.95]
+  mode_b_phys_wobble_force_scale: 1.0
+  mode_b_phys_wobble_decay_lambda_per_s: 0.0
+  mode_b_phys_wobble_duration_s: null
+  mode_b_phys_wobble_ramp_time_s: 0.45
+  # Simulated seconds of MPM (pipeline extends frame_num to cover this when sustained is on; null = compile_video_playback_sec).
+  mode_b_phys_wobble_motion_seconds: null
   mode_b_sim_area_margin: 0.2
-  mode_b_mpm_displacement_retention: 0.88
+  mode_b_mpm_displacement_retention: 0.86
   mode_b_render_freeze_gaussian_cov: true
-  mode_b_mpm_kabsch_rigid_strip: true
+  # Off: Kabsch strip removes rigid motion each frame and hides whole-table in-place wobble (COM pin fights lean).
+  mode_b_mpm_kabsch_rigid_strip: false
   mode_b_mpm_kabsch_elastic_amp: 1.0
-  # Larger MPM Y ≈ floor/feet; locks that band to rest (reduces slow hinge tilt).
-  mode_b_mpm_anchor_feet_y_percentile: 88.0
+  # Fewer foot Gaussians locked → legs participate in jelly motion.
+  mode_b_mpm_anchor_feet_y_percentile: 92.0
+  mode_b_mpm_shear_symmetric_lr_split: true
+  mode_b_mpm_tilt_diagnostics: true
+  mode_b_mpm_tilt_top_y_percentile: 32.0
 
 evaluation:
   test_views: [0, 5, 10, 15, 20]

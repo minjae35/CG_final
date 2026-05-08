@@ -47,6 +47,7 @@ def test_in_place_wobble_shear_boundary_conditions(tmp_path: Path) -> None:
         "rubber",
         p,
         in_place_wobble=True,
+        shear_symmetric_lr_split=False,
         wobble_velocity=0.05,
         wobble_end_time=0.08,
         enable_internal_particle_fill=False,
@@ -56,6 +57,30 @@ def test_in_place_wobble_shear_boundary_conditions(tmp_path: Path) -> None:
     assert len(en) == 2
     assert en[0]["velocity"][0] * en[1]["velocity"][0] < 0
     assert abs(en[0]["velocity"][0]) > abs(en[1]["velocity"][0])
+
+
+def test_in_place_wobble_symmetric_shear_four_boxes(tmp_path: Path) -> None:
+    np.random.seed(1)
+    pos = np.zeros((40, 3), dtype=np.float64)
+    pos[:, 1] = np.linspace(0.0, 0.5, 40)
+    idx = np.arange(40, dtype=np.int64)
+    p = tmp_path / "wobble_sym.json"
+    generate_phys_config(
+        idx,
+        pos,
+        "rubber",
+        p,
+        in_place_wobble=True,
+        shear_symmetric_lr_split=True,
+        wobble_velocity=0.05,
+        wobble_end_time=0.08,
+        enable_internal_particle_fill=False,
+    )
+    data = json.loads(p.read_text())
+    en = [b for b in data["boundary_conditions"] if b["type"] == "enforce_particle_translation"]
+    assert len(en) == 4
+    vxs = [b["velocity"][0] for b in en]
+    assert abs(sum(vxs)) < 1e-6
 
 
 def test_generate_phys_config_omits_filling_when_disabled(tmp_path: Path) -> None:
@@ -157,6 +182,24 @@ def test_generate_phys_config_anchor_feet_percentile(tmp_path: Path) -> None:
     assert cfg["mode_b_mpm_anchor_feet_y_percentile"] == 88.0
 
 
+def test_generate_phys_config_tilt_diagnostics_flags(tmp_path: Path) -> None:
+    pos = np.random.randn(18, 3).astype(np.float64)
+    idx = np.arange(18, dtype=np.int64)
+    p = tmp_path / "tilt.json"
+    generate_phys_config(
+        idx,
+        pos,
+        "jelly",
+        p,
+        mode_b_mpm_tilt_diagnostics=True,
+        mode_b_mpm_tilt_top_y_percentile=28.0,
+        enable_internal_particle_fill=False,
+    )
+    cfg = json.loads(p.read_text())
+    assert cfg["mode_b_mpm_tilt_diagnostics"] is True
+    assert cfg["mode_b_mpm_tilt_top_y_percentile"] == 28.0
+
+
 def test_estimate_mode_b_support_contact_y_high_percentile() -> None:
     pos = np.array(
         [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 2.0, 0.0], [0.0, 3.0, 0.0]],
@@ -249,3 +292,70 @@ def test_generate_phys_config_no_displacement_retention_at_one(tmp_path: Path) -
     )
     cfg = json.loads(p.read_text())
     assert "mode_b_mpm_displacement_retention" not in cfg
+
+
+def test_generate_phys_config_shear_wobble_full_volume_six_lr_boxes(tmp_path: Path) -> None:
+    np.random.seed(2)
+    pos = np.random.randn(40, 3).astype(np.float64)
+    pos[:, 1] += 1.5
+    idx = np.arange(40, dtype=np.int64)
+    p = tmp_path / "fullvol.json"
+    generate_phys_config(
+        idx,
+        pos,
+        "jelly",
+        p,
+        in_place_wobble=True,
+        shear_symmetric_lr_split=True,
+        shear_wobble_full_volume=True,
+        wobble_velocity=0.1,
+        wobble_end_time=0.15,
+        enable_internal_particle_fill=False,
+    )
+    cfg = json.loads(p.read_text())
+    enforce = [
+        b for b in cfg["boundary_conditions"] if b.get("type") == "enforce_particle_translation"
+    ]
+    assert len(enforce) == 6
+
+
+def test_generate_phys_config_sustained_phys_sinusoidal_writes_profile(tmp_path: Path) -> None:
+    np.random.seed(11)
+    pos = np.random.randn(50, 3).astype(np.float64)
+    pos[:, 1] += 1.2
+    idx = np.arange(50, dtype=np.int64)
+    p = tmp_path / "sust.json"
+    generate_phys_config(
+        idx,
+        pos,
+        "jelly",
+        p,
+        frame_num=100,
+        frame_dt=0.01,
+        in_place_wobble=True,
+        shear_symmetric_lr_split=True,
+        shear_wobble_full_volume=False,
+        phys_sustained_wobble=True,
+        phys_wobble_frequency_hz=1.25,
+        phys_wobble_velocity_peak=0.08,
+        phys_wobble_velocity_peak_y=0.05,
+        phys_wobble_velocity_peak_z=0.04,
+        phys_wobble_velocity_peak_diag1=0.05,
+        phys_wobble_velocity_peak_diag2=0.05,
+        phys_wobble_velocity_peak_twist=0.06,
+        phys_wobble_decay_lambda_per_s=0.0,
+        phys_wobble_ramp_time_s=0.25,
+        enable_internal_particle_fill=False,
+    )
+    cfg = json.loads(p.read_text())
+    assert cfg["mode_b_phys_sustained_wobble"] is True
+    enforce = [
+        b for b in cfg["boundary_conditions"] if b.get("type") == "enforce_particle_translation"
+    ]
+    assert len(enforce) == 12
+    assert all(e.get("velocity_profile") == "sinusoidal_jelly_multi" for e in enforce)
+    assert all(int(e.get("velocity_driver_kind", 0)) == 3 for e in enforce)
+    assert all(float(e["frequency_hz"]) == 1.25 for e in enforce)
+    assert all(abs(float(e["velocity"][1])) > 1.0e-8 for e in enforce)
+    assert all(float(e.get("diag1_amp", 0)) != 0.0 for e in enforce)
+    assert all(float(e.get("twist_amp", 0)) != 0.0 for e in enforce)

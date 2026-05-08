@@ -106,23 +106,64 @@ class PhysicsConfig(BaseModel):
     mode_b_pin_initial_com: bool = True
     # False = fix COM in X,Y,Z (furniture won't slowly drift/lean sideways). True only if you want horizontal slosh.
     mode_b_pin_com_vertical_only: bool = False
-    mode_b_pin_zero_mean_velocity_gs: bool = False
+    mode_b_pin_zero_mean_velocity_gs: bool = True
     mode_b_mpm_in_place_shear_wobble: bool = False
     mode_b_jelly_gravity_mult: float = 0.24
     # Furniture: stiffer than toy jelly; shear off by default (avoids twist/splay).
     mode_b_jelly_E: float | None = 200000.0
     mode_b_jelly_grid_v_damping_scale: float | None = 0.99990
-    mode_b_shear_wobble_velocity: float = 0.05
-    mode_b_shear_wobble_end_time: float = 0.08
-    # Each frame: x = x_rest + r*(x_mpm - x_rest) on visual Gaussians (0.88≈12% pull-back).
-    mode_b_mpm_displacement_retention: float | None = 0.88
+    mode_b_shear_wobble_velocity: float = 0.12
+    mode_b_shear_wobble_end_time: float = 0.18
+    # L/R shear boxes cover full selected height (tabletop + legs) when True (mode-b only).
+    mode_b_shear_wobble_full_volume: bool = True
+    # PhysGaussian: sustained sinusoidal shear velocity Dirichlet (MPM physics), not kinematic fallback.
+    mode_b_phys_sustained_wobble: bool = True
+    mode_b_phys_wobble_frequency_hz: float = 1.35
+    # Legacy single-axis peak (m/s into sin); used if mode_b_phys_wobble_velocity_peak_x is None.
+    mode_b_phys_wobble_velocity_peak: float = 0.09
+    mode_b_phys_wobble_velocity_peak_x: float | None = None
+    mode_b_phys_wobble_velocity_peak_y: float = 0.055
+    # Extra rad added to vertical sin vs horizontal (default π/2 for jelly lag).
+    mode_b_phys_wobble_phase_y: float = 1.5707963267948966
+    mode_b_phys_wobble_band_amp_x: list[float] | None = None
+    mode_b_phys_wobble_band_amp_y: list[float] | None = None
+    # Per vertical band (top→mid→bottom): squash top vs bottom to limit net Y impulse.
+    mode_b_phys_wobble_band_vy_polarity: list[float] | None = None
+    mode_b_phys_wobble_band_phase_y_offset_rad: list[float] | None = None
+    mode_b_phys_wobble_velocity_peak_z: float = 0.08
+    mode_b_phys_wobble_velocity_peak_diag1: float = 0.1
+    mode_b_phys_wobble_velocity_peak_diag2: float = 0.1
+    mode_b_phys_wobble_velocity_peak_twist: float = 0.12
+    mode_b_phys_wobble_phase_z: float = 0.35
+    mode_b_phys_wobble_phase_diag1_rad: float = 0.7853981633974483
+    mode_b_phys_wobble_phase_diag2_rad: float = 2.356194490192345
+    mode_b_phys_wobble_phase_twist_rad: float = 1.0471975511965976
+    mode_b_phys_wobble_bundle_quad_phase_rad: list[float] | None = None
+    mode_b_phys_wobble_bundle_band_phase_rad: list[float] | None = None
+    mode_b_phys_wobble_band_amp_z: list[float] | None = None
+    mode_b_phys_wobble_band_amp_diag1: list[float] | None = None
+    mode_b_phys_wobble_band_amp_diag2: list[float] | None = None
+    mode_b_phys_wobble_band_amp_twist: list[float] | None = None
+    mode_b_phys_wobble_force_scale: float = 1.0
+    mode_b_phys_wobble_decay_lambda_per_s: float = 0.0
+    mode_b_phys_wobble_duration_s: float | None = None
+    mode_b_phys_wobble_ramp_time_s: float = 0.45
+    mode_b_phys_wobble_motion_seconds: float | None = None
+    # Stronger snap-back fights one-way lean; lower so periodic driver survives retention blend.
+    mode_b_mpm_displacement_retention: float | None = 0.86
     # Render: keep 3DGS ellipsoid shape from sim t=0 (MPM F often spikes splats into needles).
     mode_b_render_freeze_gaussian_cov: bool = True
-    # Strip rigid translation+rotation from visual particles each frame; keep non-rigid MPM residual (in-place jelly).
-    mode_b_mpm_kabsch_rigid_strip: bool = True
+    # Off for mode-b furniture jelly: Kabsch strip projects out rigid motion each frame and hides whole-table wobble.
+    mode_b_mpm_kabsch_rigid_strip: bool = False
     mode_b_mpm_kabsch_elastic_amp: float = 1.0
-    # In MPM space after shift2center111, larger Y ≈ feet (floor contact). Snap that band to rest each frame + zero v (stops hinge/slow tilt while top wobbles).
-    mode_b_mpm_anchor_feet_y_percentile: float | None = 88.0
+    # Higher percentile → fewer Gaussians locked at feet → legs can participate in jelly motion.
+    mode_b_mpm_anchor_feet_y_percentile: float | None = 92.0
+    # L/R mirrored shear boxes (mode-b): reduces net +X impulse from Y-band shear.
+    mode_b_mpm_shear_symmetric_lr_split: bool = True
+    # Per-frame tilt metrics JSON (mode_b_mpm_tilt_series.json) + summary in mode_b_mpm_debug.json.
+    mode_b_mpm_tilt_diagnostics: bool = True
+    # Rest MPM-Y at or below this population percentile = "top" slab for L/R height tilt (low Y = tabletop).
+    mode_b_mpm_tilt_top_y_percentile: float = 32.0
     # Tighter AABB around selection for mode-b (still need index filter in PhysGaussian).
     mode_b_sim_area_margin: float | None = 0.2
 

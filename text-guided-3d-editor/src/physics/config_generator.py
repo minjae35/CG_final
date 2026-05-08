@@ -31,6 +31,24 @@ def _bbox_from_indices(positions: np.ndarray, indices: np.ndarray, margin: float
     ]
 
 
+def _triple_floats(
+    v: tuple[float, float, float] | list[float] | None,
+    default: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    if v is None or len(v) < 3:
+        return default
+    return (float(v[0]), float(v[1]), float(v[2]))
+
+
+def _quad_floats(
+    v: tuple[float, float, float, float] | list[float] | None,
+    default: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    if v is None or len(v) < 4:
+        return default
+    return (float(v[0]), float(v[1]), float(v[2]), float(v[3]))
+
+
 def generate_phys_config(
     gaussian_indices: np.ndarray,
     gaussian_positions: np.ndarray,
@@ -52,6 +70,8 @@ def generate_phys_config(
     floor_collider: bool = False,
     floor_friction: float = 0.5,
     in_place_wobble: bool = False,
+    # If True (recommended for mode-b): L/R mirror velocity boxes → near-zero net +X impulse vs single-axis shear.
+    shear_symmetric_lr_split: bool = True,
     wobble_velocity: float = 0.16,
     wobble_end_time: float = 0.04,
     sim_area_margin: float = 0.2,
@@ -64,6 +84,39 @@ def generate_phys_config(
     mode_b_mpm_kabsch_rigid_strip: bool = False,
     mode_b_mpm_kabsch_elastic_amp: float = 1.0,
     mode_b_mpm_anchor_feet_y_percentile: float | None = None,
+    mode_b_mpm_tilt_diagnostics: bool = False,
+    mode_b_mpm_tilt_top_y_percentile: float = 32.0,
+    # Mode-b only: use tall L/R slabs covering tabletop+mid+legs (see pipeline mode_b).
+    shear_wobble_full_volume: bool = False,
+    # PhysGaussian MPM: sinusoidal shear velocity Dirichlet for full sim horizon (short impulse omitted).
+    phys_sustained_wobble: bool = False,
+    phys_wobble_frequency_hz: float = 1.25,
+    phys_wobble_velocity_peak: float = 0.085,
+    phys_wobble_force_scale: float = 1.0,
+    phys_wobble_decay_lambda_per_s: float = 0.0,
+    phys_wobble_duration_s: float | None = None,
+    phys_wobble_ramp_time_s: float = 0.4,
+    phys_wobble_velocity_peak_x: float | None = None,
+    phys_wobble_velocity_peak_y: float = 0.0,
+    phys_wobble_phase_y_rad: float = 1.5707963267948966,
+    phys_wobble_band_amp_x: list[float] | None = None,
+    phys_wobble_band_amp_y: list[float] | None = None,
+    phys_wobble_band_vy_polarity: list[float] | None = None,
+    phys_wobble_band_phase_y_offset_rad: list[float] | None = None,
+    phys_wobble_velocity_peak_z: float = 0.0,
+    phys_wobble_velocity_peak_diag1: float = 0.0,
+    phys_wobble_velocity_peak_diag2: float = 0.0,
+    phys_wobble_velocity_peak_twist: float = 0.0,
+    phys_wobble_phase_z_rad: float = 0.0,
+    phys_wobble_phase_diag1_rad: float = 0.7853981633974483,
+    phys_wobble_phase_diag2_rad: float = 2.356194490192345,
+    phys_wobble_phase_twist_rad: float = 1.0471975511965976,
+    phys_wobble_bundle_quad_phase_rad: list[float] | None = None,
+    phys_wobble_bundle_band_phase_rad: list[float] | None = None,
+    phys_wobble_band_amp_z: list[float] | None = None,
+    phys_wobble_band_amp_diag1: list[float] | None = None,
+    phys_wobble_band_amp_diag2: list[float] | None = None,
+    phys_wobble_band_amp_twist: list[float] | None = None,
 ) -> tuple[str, list[float]]:
     output_path = Path(output_path)
     preset = get_preset(material_name)
@@ -123,51 +176,241 @@ def generate_phys_config(
         )
     if in_place_wobble:
         # Shear-style wobble in MPM space (``transform2origin`` + ``shift2center111``).
-        # +Y is world-down: ``y_lo_mpm`` ≈ head, ``y_hi_mpm`` ≈ feet.  Two non-overlapping
-        # horizontal slabs get opposite lateral ``vx`` so the impulse excites internal
-        # deformation instead of a uniform body translation; the lowest ~28% of the
-        # height (feet / floor contact band) is left without ``enforce`` so the base
-        # stays more stable on the collider.
+        # +Y is world-down: ``y_lo_mpm`` ≈ head, ``y_hi_mpm`` ≈ feet.
         y_lo_mpm = (float(sim_pts[:, 1].min()) - float(mean_pos[1])) * scale + 1.0
         y_hi_mpm = (float(sim_pts[:, 1].max()) - float(mean_pos[1])) * scale + 1.0
         y_span = max(1e-6, float(y_hi_mpm - y_lo_mpm))
         v_top = float(wobble_velocity)
         v_mid = -0.58 * float(wobble_velocity)
         xz_half = 1.18
-        t0, t1 = 0.0, float(wobble_end_time)
-
-        # Upper / head–chest band (~top 36% of height): +vx
-        u0 = float(y_lo_mpm + 0.02 * y_span)
-        u1 = float(y_lo_mpm + 0.38 * y_span)
-        u_c = 0.5 * (u0 + u1)
-        u_h = max(0.5 * (u1 - u0), 0.04 * y_span)
-
-        # Mid torso band (~next 32%): opposite vx (shear); gap before feet band
-        m0 = float(y_lo_mpm + 0.41 * y_span)
-        m1 = float(y_lo_mpm + 0.72 * y_span)
-        m_c = 0.5 * (m0 + m1)
-        m_h = max(0.5 * (m1 - m0), 0.04 * y_span)
-
-        boundary_conditions.append(
-            {
-                "type": "enforce_particle_translation",
-                "point": [1.0, u_c, 1.0],
-                "size": [xz_half, float(u_h), xz_half],
-                "velocity": [v_top, 0.0, 0.0],
-                "start_time": t0,
-                "end_time": t1,
-            }
+        phys_horizon = (
+            float(phys_wobble_duration_s)
+            if phys_wobble_duration_s is not None
+            else float(frame_num) * float(frame_dt) + 0.5
         )
-        boundary_conditions.append(
-            {
-                "type": "enforce_particle_translation",
-                "point": [1.0, m_c, 1.0],
-                "size": [xz_half, float(m_h), xz_half],
-                "velocity": [v_mid, 0.0, 0.0],
-                "start_time": t0,
-                "end_time": t1,
-            }
+        peak_x_scaled = float(
+            phys_wobble_velocity_peak
+            if phys_wobble_velocity_peak_x is None
+            else phys_wobble_velocity_peak_x
+        ) * float(phys_wobble_force_scale)
+        peak_y_scaled = float(phys_wobble_velocity_peak_y) * float(phys_wobble_force_scale)
+        sine_common = (
+            ("sinusoidal", float(phys_wobble_frequency_hz), float(phys_wobble_decay_lambda_per_s))
+            if phys_sustained_wobble
+            else ("constant", 0.0, 0.0)
         )
+
+        if phys_sustained_wobble and shear_symmetric_lr_split:
+            prof, freq_hz, decay_lam = sine_common
+            if prof != "sinusoidal":
+                raise ValueError("phys_sustained_wobble expects sinusoidal time profile")
+            bax = _triple_floats(phys_wobble_band_amp_x, (1.0, 1.0, 1.0))
+            bay = _triple_floats(phys_wobble_band_amp_y, (1.0, 0.55, 0.45))
+            vpol = _triple_floats(phys_wobble_band_vy_polarity, (1.0, 0.38, -0.82))
+            phb = _triple_floats(phys_wobble_band_phase_y_offset_rad, (0.0, 0.1, -0.12))
+            hr = (1.0, -0.58, 0.52)
+            bz = _triple_floats(phys_wobble_band_amp_z, (1.0, 0.92, 0.85))
+            bd1 = _triple_floats(phys_wobble_band_amp_diag1, (1.0, 0.9, 0.84))
+            bd2 = _triple_floats(phys_wobble_band_amp_diag2, (1.0, 0.9, 0.84))
+            btw = _triple_floats(phys_wobble_band_amp_twist, (1.0, 0.95, 0.9))
+            qb = _quad_floats(
+                phys_wobble_bundle_quad_phase_rad,
+                (0.0, 0.52, 1.05, 1.58),
+            )
+            bb = _triple_floats(phys_wobble_bundle_band_phase_rad, (0.0, 0.2, -0.14))
+            peak_z_scaled = float(phys_wobble_velocity_peak_z) * float(
+                phys_wobble_force_scale
+            )
+            pk_d1 = float(phys_wobble_velocity_peak_diag1) * float(phys_wobble_force_scale)
+            pk_d2 = float(phys_wobble_velocity_peak_diag2) * float(phys_wobble_force_scale)
+            pk_tw = float(phys_wobble_velocity_peak_twist) * float(phys_wobble_force_scale)
+            xq = 0.32
+            zq = 0.32
+            x_hw_q = 0.22
+            z_hw_q = 0.22
+            quad_xc = (1.0 - xq, 1.0 - xq, 1.0 + xq, 1.0 + xq)
+            quad_zc = (1.0 - zq, 1.0 + zq, 1.0 - zq, 1.0 + zq)
+            bands_frac = ((0.03, 0.38), (0.40, 0.68), (0.70, 0.97))
+            for bi in range(3):
+                y0f, y1f = bands_frac[bi]
+                y0 = float(y_lo_mpm + y0f * y_span)
+                y1 = float(y_lo_mpm + y1f * y_span)
+                y_c = 0.5 * (y0 + y1)
+                y_h = max(0.5 * (y1 - y0), 0.035 * y_span)
+                phase_y_e = float(phys_wobble_phase_y_rad) + phb[bi]
+                phase_z_e = float(phys_wobble_phase_z_rad) + phb[bi] * 0.42
+                bundle_band = bb[bi]
+                for qi in range(4):
+                    lr = 1.0 if qi in (0, 1) else -1.0
+                    fz = 1.0 if qi in (0, 2) else -1.0
+                    d1s = 1.0 if qi in (0, 3) else -1.0
+                    d2s = 1.0 if qi in (1, 2) else -1.0
+                    tws = 1.0 if qi in (0, 2) else -1.0
+                    vx_axis = peak_x_scaled * bax[bi] * hr[bi] * lr
+                    vy_b = peak_y_scaled * bay[bi] * vpol[bi]
+                    vz_axis = peak_z_scaled * bz[bi] * fz
+                    diag1_b = pk_d1 * bd1[bi] * d1s
+                    diag2_b = pk_d2 * bd2[bi] * d2s
+                    twist_b = pk_tw * btw[bi] * tws
+                    bundle_ph = qb[qi] + bundle_band
+                    boundary_conditions.append(
+                        {
+                            "type": "enforce_particle_translation",
+                            "point": [float(quad_xc[qi]), y_c, float(quad_zc[qi])],
+                            "size": [float(x_hw_q), float(y_h), float(z_hw_q)],
+                            "velocity": [
+                                float(vx_axis),
+                                float(vy_b),
+                                float(vz_axis),
+                            ],
+                            "start_time": 0.0,
+                            "end_time": float(phys_horizon),
+                            "velocity_profile": "sinusoidal_jelly_multi",
+                            "frequency_hz": freq_hz,
+                            "phase_rad": 0.0,
+                            "phase_y_rad": float(phase_y_e),
+                            "phase_z_rad": float(phase_z_e),
+                            "phase_diag1_rad": float(phys_wobble_phase_diag1_rad)
+                            + phb[bi] * 0.18,
+                            "phase_diag2_rad": float(phys_wobble_phase_diag2_rad)
+                            - phb[bi] * 0.12,
+                            "phase_twist_rad": float(phys_wobble_phase_twist_rad)
+                            + phb[bi] * 0.25,
+                            "diag1_amp": float(diag1_b),
+                            "diag2_amp": float(diag2_b),
+                            "twist_amp": float(twist_b),
+                            "bundle_spatial_phase_rad": float(bundle_ph),
+                            "decay_lambda_per_s": decay_lam,
+                            "ramp_duration_s": float(phys_wobble_ramp_time_s),
+                            "velocity_driver_kind": 3,
+                        }
+                    )
+
+        elif phys_sustained_wobble:
+            raise ValueError(
+                "phys_sustained_wobble requires shear_symmetric_lr_split for zero-net L/R shear"
+            )
+
+        elif shear_symmetric_lr_split:
+            t0, t1 = 0.0, float(wobble_end_time)
+
+            u0 = float(y_lo_mpm + 0.02 * y_span)
+            u1 = float(y_lo_mpm + 0.38 * y_span)
+            u_c = 0.5 * (u0 + u1)
+            u_h = max(0.5 * (u1 - u0), 0.04 * y_span)
+
+            m0 = float(y_lo_mpm + 0.41 * y_span)
+            m1 = float(y_lo_mpm + 0.72 * y_span)
+            m_c = 0.5 * (m0 + m1)
+            m_h = max(0.5 * (m1 - m0), 0.04 * y_span)
+
+            # Separate L/R boxes at the same Y so net +X momentum cancels (reduces one-way torque).
+            x_off = 0.48
+            x_hw = 0.42
+            if shear_wobble_full_volume:
+                bands: list[tuple[float, float, float]] = [
+                    (0.03, 0.38, float(v_top)),
+                    (0.40, 0.68, float(-0.58 * v_top)),
+                    (0.70, 0.97, float(0.52 * v_top)),
+                ]
+                for y0f, y1f, v_x in bands:
+                    y0 = float(y_lo_mpm + y0f * y_span)
+                    y1 = float(y_lo_mpm + y1f * y_span)
+                    y_c = 0.5 * (y0 + y1)
+                    y_h = max(0.5 * (y1 - y0), 0.035 * y_span)
+                    boundary_conditions.append(
+                        {
+                            "type": "enforce_particle_translation",
+                            "point": [float(1.0 - x_off), y_c, 1.0],
+                            "size": [float(x_hw), float(y_h), xz_half],
+                            "velocity": [v_x, 0.0, 0.0],
+                            "start_time": t0,
+                            "end_time": t1,
+                        }
+                    )
+                    boundary_conditions.append(
+                        {
+                            "type": "enforce_particle_translation",
+                            "point": [float(1.0 + x_off), y_c, 1.0],
+                            "size": [float(x_hw), float(y_h), xz_half],
+                            "velocity": [-v_x, 0.0, 0.0],
+                            "start_time": t0,
+                            "end_time": t1,
+                        }
+                    )
+            else:
+                boundary_conditions.append(
+                    {
+                        "type": "enforce_particle_translation",
+                        "point": [float(1.0 - x_off), u_c, 1.0],
+                        "size": [float(x_hw), float(u_h), xz_half],
+                        "velocity": [v_top, 0.0, 0.0],
+                        "start_time": t0,
+                        "end_time": t1,
+                    }
+                )
+                boundary_conditions.append(
+                    {
+                        "type": "enforce_particle_translation",
+                        "point": [float(1.0 + x_off), u_c, 1.0],
+                        "size": [float(x_hw), float(u_h), xz_half],
+                        "velocity": [-v_top, 0.0, 0.0],
+                        "start_time": t0,
+                        "end_time": t1,
+                    }
+                )
+                boundary_conditions.append(
+                    {
+                        "type": "enforce_particle_translation",
+                        "point": [float(1.0 - x_off), m_c, 1.0],
+                        "size": [float(x_hw), float(m_h), xz_half],
+                        "velocity": [v_mid, 0.0, 0.0],
+                        "start_time": t0,
+                        "end_time": t1,
+                    }
+                )
+                boundary_conditions.append(
+                    {
+                        "type": "enforce_particle_translation",
+                        "point": [float(1.0 + x_off), m_c, 1.0],
+                        "size": [float(x_hw), float(m_h), xz_half],
+                        "velocity": [-v_mid, 0.0, 0.0],
+                        "start_time": t0,
+                        "end_time": t1,
+                    }
+                )
+        else:
+            t0, t1 = 0.0, float(wobble_end_time)
+            u0 = float(y_lo_mpm + 0.02 * y_span)
+            u1 = float(y_lo_mpm + 0.38 * y_span)
+            u_c = 0.5 * (u0 + u1)
+            u_h = max(0.5 * (u1 - u0), 0.04 * y_span)
+
+            m0 = float(y_lo_mpm + 0.41 * y_span)
+            m1 = float(y_lo_mpm + 0.72 * y_span)
+            m_c = 0.5 * (m0 + m1)
+            m_h = max(0.5 * (m1 - m0), 0.04 * y_span)
+
+            boundary_conditions.append(
+                {
+                    "type": "enforce_particle_translation",
+                    "point": [1.0, u_c, 1.0],
+                    "size": [xz_half, float(u_h), xz_half],
+                    "velocity": [v_top, 0.0, 0.0],
+                    "start_time": t0,
+                    "end_time": t1,
+                }
+            )
+            boundary_conditions.append(
+                {
+                    "type": "enforce_particle_translation",
+                    "point": [1.0, m_c, 1.0],
+                    "size": [xz_half, float(m_h), xz_half],
+                    "velocity": [v_mid, 0.0, 0.0],
+                    "start_time": t0,
+                    "end_time": t1,
+                }
+            )
     boundary_conditions.append({"type": "bounding_box"})
 
     base: dict = {
@@ -209,6 +452,38 @@ def generate_phys_config(
         ap = float(mode_b_mpm_anchor_feet_y_percentile)
         if 0.0 < ap < 100.0:
             base["mode_b_mpm_anchor_feet_y_percentile"] = ap
+    if mode_b_mpm_tilt_diagnostics:
+        base["mode_b_mpm_tilt_diagnostics"] = True
+        base["mode_b_mpm_tilt_top_y_percentile"] = float(mode_b_mpm_tilt_top_y_percentile)
+    if phys_sustained_wobble and in_place_wobble:
+        base["mode_b_phys_sustained_wobble"] = True
+        base["mode_b_phys_wobble_frequency_hz"] = float(phys_wobble_frequency_hz)
+        base["mode_b_phys_wobble_velocity_peak"] = float(phys_wobble_velocity_peak)
+        base["mode_b_phys_wobble_velocity_peak_x"] = float(
+            phys_wobble_velocity_peak
+            if phys_wobble_velocity_peak_x is None
+            else phys_wobble_velocity_peak_x
+        )
+        base["mode_b_phys_wobble_velocity_peak_y"] = float(phys_wobble_velocity_peak_y)
+        base["mode_b_phys_wobble_velocity_peak_z"] = float(phys_wobble_velocity_peak_z)
+        base["mode_b_phys_wobble_velocity_peak_diag1"] = float(
+            phys_wobble_velocity_peak_diag1
+        )
+        base["mode_b_phys_wobble_velocity_peak_diag2"] = float(
+            phys_wobble_velocity_peak_diag2
+        )
+        base["mode_b_phys_wobble_velocity_peak_twist"] = float(
+            phys_wobble_velocity_peak_twist
+        )
+        base["mode_b_phys_wobble_phase_y_rad"] = float(phys_wobble_phase_y_rad)
+        base["mode_b_phys_wobble_phase_z_rad"] = float(phys_wobble_phase_z_rad)
+        base["mode_b_phys_wobble_force_scale"] = float(phys_wobble_force_scale)
+        base["mode_b_phys_wobble_decay_lambda_per_s"] = float(
+            phys_wobble_decay_lambda_per_s
+        )
+        if phys_wobble_duration_s is not None:
+            base["mode_b_phys_wobble_duration_s"] = float(phys_wobble_duration_s)
+        base["mode_b_phys_wobble_ramp_time_s"] = float(phys_wobble_ramp_time_s)
     if world_up is not None:
         base["mpm_space_vertical_upward_axis"] = [float(c) for c in world_up]
     base.update(preset)

@@ -58,7 +58,7 @@ physics:
   smoke_snow_E: 80000.0
   smoke_metal_E: 150000.0
   smoke_particle_filling: false
-  compile_video_playback_sec: 10.0
+  compile_video_playback_sec: 5.0
   mode_b_selection_dilate_m: 0.12
   mode_b_selection_dilate_passes: 2
   mode_b_subtract_rigid_drift: true
