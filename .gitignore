@@ -4,6 +4,16 @@ text-guided-3d-editor/output/
 # Mip-NeRF / COLMAP data stored in-repo
 text-guided-3d-editor/data/
 
+# Model weights / checkpoints (downloaded externally)
+text-guided-3d-editor/groundingdino_swint_ogc.pth
+text-guided-3d-editor/sam2.1_hiera_base_plus.pt
+text-guided-3d-editor/sam2.1_hiera_small.pt
+text-guided-3d-editor/sam2.1_hiera_tiny.pt
+
+# Checkpoints stored under submodules (do not commit)
+text-guided-3d-editor/submodules/Grounded-SAM-2/checkpoints/
+text-guided-3d-editor/submodules/Grounded-SAM-2/gdino_checkpoints/
+
 # Documents
 documents/
 

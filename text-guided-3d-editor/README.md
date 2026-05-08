@@ -42,9 +42,35 @@ pip install -r requirements.txt
 
 Install **3DGS CUDA extensions** and **Grounded-SAM-2 / DreamGaussian / PhysGaussian** deps per upstream READMEs.
 
+### Build CUDA extensions (reproducible, no submodule edits)
+
+This project uses CUDA extensions from the pinned `gaussian-splatting` submodule (e.g. `simple_knn`, `diff_gaussian_rasterization`).
+To keep submodules clean while still supporting diverse toolchains, we build/install them into your current Python environment:
+
+```bash
+cd text-guided-3d-editor
+bash scripts/build_cuda_extensions.sh
+```
+
+### GroundingDINO CUDA op note (Linux)
+
+If you build `groundingdino._C` (MsDeformAttn) from `submodules/Grounded-SAM-2/grounding_dino`, your runtime may need
+Torch's bundled shared libraries on the dynamic linker path. If you see `ImportError: libc10.so`, run:
+
+```bash
+export LD_LIBRARY_PATH="$(python -c 'import torch, pathlib; print((pathlib.Path(torch.__file__).resolve().parent/\"lib\").as_posix())'):$LD_LIBRARY_PATH"
+```
+
 ## Checkpoints (Grounded SAM 2)
 
-`configs/pipeline_config.yaml` points at files under `submodules/Grounded-SAM-2/` (Grounding DINO + SAM 2). They are **not** in git: follow [Grounded-SAM-2/README.md](submodules/Grounded-SAM-2/README.md) to download weights into the expected paths before `pipeline.py` segmentation.
+`configs/pipeline_config.yaml` points at files under `submodules/Grounded-SAM-2/` (Grounding DINO + SAM 2). They are **not** in git.
+
+Download them into the expected paths with:
+
+```bash
+cd text-guided-3d-editor
+bash scripts/download_checkpoints.sh
+```
 
 ## Data (PRD v2)
 
