@@ -20,9 +20,11 @@ def text_to_mask(
     sam2_config: str | Path | None = None,
     sam2_checkpoint: str | Path | None = None,
     device: str = "cuda",
+    allow_cpu_fallback: bool = False,
     debug_mask_dir: Path | str | None = None,
     debug_stem: str = "view",
     log_progress: bool = False,
+    debug_info: dict | None = None,
 ) -> np.ndarray:
     """
     Returns bool mask (H, W). Uses Grounded-SAM-2 when models import; otherwise
@@ -48,10 +50,29 @@ def text_to_mask(
 
     dbg = Path(debug_mask_dir).resolve() if debug_mask_dir else None
 
+    missing: list[Path] = [p for p in (gd_cfg, gd_ckpt, s2_cfg, s2_ckpt) if not p.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing Grounded-SAM-2 assets: "
+            + ", ".join(str(p) for p in missing)
+            + " (check submodules + checkpoint paths in configs/pipeline_config.yaml)"
+        )
+
+    if debug_info is not None:
+        debug_info.clear()
+        debug_info["prompt"] = str(text_prompt)
+        debug_info["image_path"] = str(image_path)
+        debug_info["is_fallback_rect"] = False
+        debug_info["dino_confidence"] = None
+        debug_info["mask_bbox_xyxy"] = None
+        debug_info["mask_true_pixels"] = None
+        debug_info["mask_area_ratio"] = None
+        debug_info["mask_hw"] = None
+
     try:
         from segmentation.grounded_sam2_mask import grounded_sam2_binary_mask
 
-        return grounded_sam2_binary_mask(
+        mask = grounded_sam2_binary_mask(
             image_path,
             text_prompt,
             gs2_root=gs2,
@@ -62,23 +83,33 @@ def text_to_mask(
             box_threshold=box_threshold,
             text_threshold=text_threshold,
             device=device,
+            allow_cpu_fallback=bool(allow_cpu_fallback),
             debug_dir=dbg,
             debug_stem=debug_stem,
             log_progress=log_progress,
         )
-    except Exception as exc:
-        # CI / missing weights / import errors — keep a deterministic wide mask
-        from PIL import Image as PILImage
-
-        img = np.array(PILImage.open(image_path).convert("RGB"))
-        h, w = img.shape[:2]
-        mask = np.zeros((h, w), dtype=bool)
-        mask[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4] = True
-        if dbg is not None:
-            dbg.mkdir(parents=True, exist_ok=True)
-            import cv2
-
-            m = (mask.astype(np.uint8) * 255).reshape(h, w)
-            cv2.imwrite(str(dbg / f"{debug_stem}_mask_binary_fallback.png"), m)
-            print(f"[text_to_mask] Grounded-SAM-2 failed ({exc!r}); using centre fallback mask.", flush=True)
+        if debug_info is not None:
+            h, w = mask.shape
+            debug_info["mask_hw"] = [int(h), int(w)]
+            tp = int(mask.sum())
+            debug_info["mask_true_pixels"] = tp
+            debug_info["mask_area_ratio"] = float(tp) / float(h * w) if h * w > 0 else None
+            ys, xs = np.where(mask)
+            if ys.size:
+                x0, x1 = int(xs.min()), int(xs.max())
+                y0, y1 = int(ys.min()), int(ys.max())
+                debug_info["mask_bbox_xyxy"] = [x0, y0, x1, y1]
         return mask
+    except Exception as exc:
+        # Policy: never return a fake/center-box mask. Fail loudly by default.
+        # If allow_cpu_fallback=True, the underlying Grounded-SAM2 wrapper may retry on CPU,
+        # but if we still land here we must raise a clear error.
+        if debug_info is not None:
+            debug_info["exception_repr"] = repr(exc)
+        raise RuntimeError(
+            "Grounded-SAM2 segmentation failed. This project does not generate a fake fallback mask. "
+            "Fix the Grounded-SAM-2/CUDA extension build (e.g. GroundingDINO _C) and checkpoint paths. "
+            "If you want a slow CPU retry, pass --allow-cpu-fallback (it will only retry; it will not "
+            "replace the result with a synthetic mask). "
+            f"Original exception: {exc!r}"
+        ) from exc
