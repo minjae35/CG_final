@@ -64,15 +64,17 @@ def run_simulation(
             pass
 
     frames_dir = out / "frames"
-    # Normalize to Mode-A-style layout: frames/ + videos/
-    # Keep legacy compatibility with older runs that used video/.
-    video_dir = out / "videos"
-    legacy_video_dir = out / "video"
+    # Mode-b layout: frames/ + video/ (single folder name, no plural).
+    video_dir = out / "video"
+    legacy_video_dir = out / "videos"
+    if legacy_video_dir.is_dir() and not video_dir.is_dir():
+        # One-time migration: rename videos/ -> video/ so downstream paths are stable.
+        legacy_video_dir.rename(video_dir)
 
     # PhysGaussian (this repo's `gs_simulation.py`) writes PNG frames directly
     # under `--output_path` and writes `output.mp4` into the same folder.
     # So: pass frames_dir to PhysGaussian so frames land in <out>/frames/,
-    # then move frames_dir/output.mp4 → <out>/videos/output.mp4.
+    # then move frames_dir/output.mp4 → <out>/video/output.mp4.
     phys_out = frames_dir
 
     cmd = [
@@ -106,12 +108,35 @@ def run_simulation(
 
     env = os.environ.copy()
     pg = str(sim_py.parent)
-    env["PYTHONPATH"] = pg + os.pathsep + env.get("PYTHONPATH", "")
+    # Keep PhysGaussian first on sys.path, but avoid accidentally importing *repo* submodule
+    # CUDA extensions (diff-gaussian-rasterization / gaussian-splatting) when a compiled
+    # site-packages version exists. Those repo copies may lack compiled `_C` and cause
+    # circular-import / missing-extension errors.
+    prior_pp = env.get("PYTHONPATH", "")
+    if prior_pp:
+        parts = [p for p in prior_pp.split(os.pathsep) if p]
+        blocked = (
+            f"{os.sep}submodules{os.sep}gaussian-splatting{os.sep}submodules{os.sep}diff-gaussian-rasterization",
+            f"{os.sep}submodules{os.sep}gaussian-splatting",
+        )
+        parts = [p for p in parts if not any(b in p for b in blocked)]
+        prior_pp = os.pathsep.join(parts)
+    env["PYTHONPATH"] = pg + (os.pathsep + prior_pp if prior_pp else "")
+    # Ensure PyTorch shared libs (libc10.so, libtorch_cuda.so, ...) are discoverable in subprocess.
+    # Some environments don't populate LD_LIBRARY_PATH for non-interactive subprocesses.
+    try:
+        import torch
+
+        torch_lib = Path(torch.__file__).resolve().parent / "lib"
+        if torch_lib.is_dir():
+            env["LD_LIBRARY_PATH"] = str(torch_lib) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+    except Exception:
+        pass
     if taichi_device_memory_gb is not None:
         env["PHYSGAUSSIAN_TAICHI_DEVICE_MEMORY_GB"] = str(float(taichi_device_memory_gb))
     subprocess.run(cmd, check=True, cwd=pg, env=env, timeout=86400)
 
-    # Normalize all variants to <out>/videos/output.mp4 so downstream paths stay consistent.
+    # Normalize all variants to <out>/video/output.mp4 so downstream paths stay consistent.
     primary = video_dir / "output.mp4"
     phys_mp4 = frames_dir / "output.mp4"
     if phys_mp4.is_file():

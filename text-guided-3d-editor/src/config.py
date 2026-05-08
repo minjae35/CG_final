@@ -40,6 +40,8 @@ class SegmentationConfig(BaseModel):
     inference_width: int = 640
     inference_height: int = 480
     segmentation_device: str = "cuda"
+    # GPU-only by default: if True, allow slow CPU retry / debug fallback mask.
+    allow_cpu_fallback: bool = False
     # mask → 3DGS (mode-b / multi-view)
     mask_stride: int = 2
     mask_3d_distance_threshold_m: float = 0.07
@@ -180,6 +182,17 @@ class PathsConfig(BaseModel):
     eval_output: str = "output/eval"
 
 
+class ModeBPresetConfig(BaseModel):
+    """Named mode-b profiles (prompt/material/output + optional physics overrides)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    selection_prompt: str
+    physics_type: str = "jelly"  # material preset name (see physics/material_presets.py)
+    output_subdir: str = "mode_b_jelly"
+    physics_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
 class PipelineConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -189,6 +202,7 @@ class PipelineConfig(BaseModel):
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     placement: PlacementConfig = Field(default_factory=PlacementConfig)
     physics: PhysicsConfig = Field(default_factory=PhysicsConfig)
+    mode_b_presets: dict[str, ModeBPresetConfig] = Field(default_factory=dict)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
 
