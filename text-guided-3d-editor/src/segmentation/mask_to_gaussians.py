@@ -83,6 +83,42 @@ def indices_project_inside_mask(
     return np.sort(idx_all[inside])
 
 
+def projection_stage_counts(
+    mask: np.ndarray,
+    gaussian_positions: np.ndarray,
+    camera_intrinsics: np.ndarray,
+    world_view_transform: np.ndarray,
+    *,
+    subsample: int = 1,
+) -> dict[str, int]:
+    """
+    Debug counts for projection-based selection stages (subsampled).
+
+    - projected_in_bounds: z>0 and pixel in image bounds
+    - projected_inside_mask: subset that lands on mask==True
+    """
+    pos = np.asarray(gaussian_positions, dtype=np.float64)
+    if pos.size == 0:
+        return {"subsample": int(max(1, subsample)), "tested": 0, "projected_in_bounds": 0, "projected_inside_mask": 0}
+    ss = max(1, int(subsample))
+    idx_all = np.arange(0, pos.shape[0], ss, dtype=np.int64)
+    sub = pos[idx_all]
+    u, v, z = project_world_to_pixels(camera_intrinsics, np.asarray(world_view_transform, dtype=np.float64), sub)
+    H, Wm = mask.shape
+    valid = z > 1e-6
+    ui = np.floor(u + 0.5).astype(np.int32)
+    vi = np.floor(v + 0.5).astype(np.int32)
+    inb = valid & (ui >= 0) & (ui < Wm) & (vi >= 0) & (vi < H)
+    inside = np.zeros_like(inb, dtype=bool)
+    inside[inb] = mask[vi[inb], ui[inb]]
+    return {
+        "subsample": int(ss),
+        "tested": int(idx_all.size),
+        "projected_in_bounds": int(inb.sum()),
+        "projected_inside_mask": int(inside.sum()),
+    }
+
+
 def mask_to_gaussian_indices(
     mask: np.ndarray,
     depth_map: np.ndarray,

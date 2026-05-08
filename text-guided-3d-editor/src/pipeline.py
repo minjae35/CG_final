@@ -223,7 +223,12 @@ def train(
 
 @app.command()
 def mode_b(
-    text: str = typer.Argument(..., help="Object description"),
+    text: str | None = typer.Argument(None, help="Object description (ignored when --preset is set)"),
+    preset: str | None = typer.Option(
+        None,
+        "--preset",
+        help="Named mode-b profile from config mode_b_presets (e.g. desk_jelly, footrest_sand).",
+    ),
     config: Path = typer.Option(PROJECT_ROOT / "configs" / "pipeline_config.yaml", "--config"),
     smoke: bool = typer.Option(
         False,
@@ -310,8 +315,59 @@ def mode_b(
         "--taichi-memory-gb",
         help="PhysGaussian Taichi device_memory_GB (default: physics.taichi_device_memory_gb; T4 often 4–5).",
     ),
+    allow_cpu_fallback: bool = typer.Option(
+        False,
+        "--allow-cpu-fallback",
+        help="If GPU Grounded-SAM2 / GroundingDINO CUDA ops fail, retry once on CPU (slow). "
+        "If not set (default), segmentation is GPU-only and failures abort loudly.",
+    ),
 ) -> None:
     cfg = PipelineConfig.load(config)
+    mode_b_preset = None
+    if preset is None:
+        raise typer.BadParameter(
+            "mode-b requires --preset (e.g. --preset footrest_sand). "
+            "This avoids accidentally writing to the legacy mode_b_jelly folder."
+        )
+    if preset not in cfg.mode_b_presets:
+        raise typer.BadParameter(
+            f"Unknown --preset {preset!r}. Available: {sorted(cfg.mode_b_presets.keys())}"
+        )
+    mode_b_preset = cfg.mode_b_presets[preset]
+    text = mode_b_preset.selection_prompt
+
+    # Always log the final resolved prompt/preset early (helps reproduce runs).
+    console.print(
+        f"[mode-b debug] preset={preset}  "
+        f"segmentation_prompt={text!r}  "
+        f"reuse_selection={bool(reuse_selection)}  "
+        f"debug_selection={bool(debug_selection)}  "
+        f"sam2_render_camera_only={bool(sam2_render_camera_only)}"
+    )
+    # Propagate behavior to segmentation helpers (GPU-only by default).
+    try:
+        cfg.segmentation.allow_cpu_fallback = bool(allow_cpu_fallback)
+    except Exception:
+        pass
+
+    resolved_out_subdir = str(mode_b_preset.output_subdir)
+    mode_b_out = cfg.resolve(cfg.paths.sim_output) / resolved_out_subdir
+    mode_b_out.mkdir(parents=True, exist_ok=True)
+
+    # Per-preset physics config overrides (do not mutate cfg.physics globally).
+    phys = cfg.physics
+    if mode_b_preset is not None and mode_b_preset.physics_overrides:
+        phys = type(cfg.physics).model_validate(
+            {**cfg.physics.model_dump(), **dict(mode_b_preset.physics_overrides)}
+        )
+    material_name = str(mode_b_preset.physics_type) if mode_b_preset is not None else "jelly"
+
+    console.print(
+        f"[mode-b preset] preset={preset or 'none'}  "
+        f"prompt={text!r}  "
+        f"physics_type={material_name}  "
+        f"out={mode_b_out}"
+    )
     colmap_scene = cfg.resolve(cfg.scene.data_root) / cfg.scene.scene_name
     model_out = cfg.resolve(cfg.scene.model_output)
     use_smoke_3dgs_checkpoint = smoke or smoke_3dgs
@@ -327,6 +383,7 @@ def mode_b(
         run_mask_projection_debug(
             cfg=cfg,
             text=text,
+            mode_b_out=mode_b_out,
             smoke=smoke,
             smoke_3dgs=smoke_3dgs,
             force_rerender_views=force_rerender_views,
@@ -336,9 +393,9 @@ def mode_b(
             maybe_cuda_empty=_maybe_cuda_empty,
         )
         return
-    _mpm_grid = int(cfg.physics.n_grid_low if smoke else cfg.physics.n_grid)
-    _mpm_frames = int(cfg.physics.mode_b_mpm_smoke_frames if smoke else cfg.physics.frame_num)
-    _taichi_gb = float(taichi_memory_gb) if taichi_memory_gb is not None else float(cfg.physics.taichi_device_memory_gb)
+    _mpm_grid = int(phys.n_grid_low if smoke else phys.n_grid)
+    _mpm_frames = int(phys.mode_b_mpm_smoke_frames if smoke else phys.frame_num)
+    _taichi_gb = float(taichi_memory_gb) if taichi_memory_gb is not None else float(phys.taichi_device_memory_gb)
     console.print(
         f"[bold]mode-b[/] smoke_3dgs={bool(use_smoke_3dgs_checkpoint)} iters={iters} "
         f"MPM(n_grid={_mpm_grid}, frames={_mpm_frames}) taichi_mem_GB={_taichi_gb}"
@@ -349,9 +406,6 @@ def mode_b(
     gply = PlyData.read(str(ply_path))
     v = gply["vertex"]
     pos = np.stack([np.asarray(v["x"]), np.asarray(v["y"]), np.asarray(v["z"])], axis=1)
-
-    mode_b_out = cfg.resolve(cfg.paths.sim_output) / "mode_b_jelly"
-    mode_b_out.mkdir(parents=True, exist_ok=True)
     if debug_selection and clean_debug_dir:
         shutil.rmtree(mode_b_out / "debug", ignore_errors=True)
     p_sel_cam_file = mode_b_out / "debug_selection" / "best_camera_index.txt"
@@ -370,17 +424,33 @@ def mode_b(
     surface_indices_path = mode_b_out / "surface_gaussian_indices.npy"
     idx_surface: np.ndarray | None = None
     idx_nearest_consensus: np.ndarray | None = None
+    reused_surface_cache: Path | None = None
     if reuse_selection:
-        for cached in (
-            cfg.resolve("output/3d_gaussian_selection_debug/selected_indices.npy"),
-            surface_indices_path,
-        ):
+        # IMPORTANT: per-preset selection must not reuse the legacy global cache
+        # (it usually contains the desk selection). Only reuse that cache for the
+        # legacy desk_jelly path.
+        cached_candidates: list[Path] = [surface_indices_path]
+        global_cache = cfg.resolve("output/3d_gaussian_selection_debug/selected_indices.npy")
+        if resolved_out_subdir == "mode_b_jelly" and (preset is None or preset == "desk_jelly"):
+            cached_candidates.insert(0, global_cache)
+        for cached in cached_candidates:
             if cached.is_file():
                 idx_surface = np.load(cached).astype(np.int64)
+                reused_surface_cache = cached
                 console.print(f"Reusing cached surface indices: [cyan]{cached}[/] ({len(idx_surface)} Gaussians)")
                 break
 
+    if idx_surface is not None:
+        console.print(
+            f"[mode-b selection] preset={preset or 'none'}  prompt={text!r}  "
+            f"reuse_selection={bool(reuse_selection)}  reused_surface_cache={str(reused_surface_cache) if reused_surface_cache else None}"
+        )
+
     if idx_surface is None:
+        console.print(
+            f"[mode-b selection] preset={preset or 'none'}  prompt={text!r}  "
+            f"reuse_selection={bool(reuse_selection)}  cached_surface_exists={surface_indices_path.is_file()}"
+        )
         render_dir = cfg.resolve("output/renders_views")
         seg = cfg.segmentation
         console.print("[mode-b] Rendering training views for segmentation (see render_views logs)...")
@@ -398,7 +468,10 @@ def mode_b(
         sets_depth: list[np.ndarray] = []
         vs = int(cfg.reconstruction.render_view_stride)
         all_rgbs = sorted(render_dir.glob("rgb_*.png"))
-        if sam2_render_camera_only or forced_overlay_cam is not None:
+        # IMPORTANT: forced_overlay_cam is used for later debug/video camera selection, but should
+        # NOT implicitly reduce Grounded-SAM2 to a single view. Otherwise consensus_min_votes (>=2)
+        # can zero out the selection when multi_view_count=1.
+        if sam2_render_camera_only:
             cam_train = int(forced_overlay_cam) if forced_overlay_cam is not None else 0
             want_local = cam_train // vs
             match = render_dir / f"rgb_{want_local:05d}.png"
@@ -419,15 +492,15 @@ def mode_b(
                 )
         else:
             rgbs = all_rgbs[: seg.multi_view_count]
-            for rgb in rgbs:
-                stem0 = rgb.stem.replace("rgb_", "")
-                try:
-                    li = int(stem0)
-                except ValueError:
-                    li = 0
-                camera_audit.append(
-                    f"Grounded-SAM2: training_camera_index={li * vs}  rgb_file={rgb.name}"
-                )
+        for rgb in rgbs:
+            stem0 = rgb.stem.replace("rgb_", "")
+            try:
+                li = int(stem0)
+            except ValueError:
+                li = 0
+            camera_audit.append(
+                f"Grounded-SAM2: training_camera_index={li * vs}  rgb_file={rgb.name}"
+            )
         for vi, rgb in enumerate(rgbs):
             console.print(
                 f"[mode-b] Segmentation view {vi + 1}/{len(rgbs)}: [cyan]{rgb.name}[/] "
@@ -437,6 +510,7 @@ def mode_b(
             meta = np.load(render_dir / f"cam_meta_{stem}.npz")
             K = np.asarray(meta["K"], dtype=np.float64)
             w2c = np.asarray(meta["world_view_transform"], dtype=np.float64)
+            mask_dbg_info: dict = {}
             mask = text_to_mask(
                 str(rgb),
                 text,
@@ -447,14 +521,33 @@ def mode_b(
                 sam2_config=seg.sam2_config or None,
                 sam2_checkpoint=seg.sam2_checkpoint or None,
                 device=seg.segmentation_device,
+                allow_cpu_fallback=bool(getattr(seg, "allow_cpu_fallback", False)),
                 debug_mask_dir=mask_dbg,
                 debug_stem=f"rgb_{stem}",
+                debug_info=mask_dbg_info,
             )
+            h_m, w_m = mask.shape
+            true_px = int(mask.sum())
+            bbox = mask_dbg_info.get("mask_bbox_xyxy")
+            area_ratio = mask_dbg_info.get("mask_area_ratio")
+            is_fallback_rect = bool(mask_dbg_info.get("is_fallback_rect", False))
+            console.print(
+                f"[mode-b mask] stem={stem}  hw={h_m}x{w_m}  true_px={true_px}  "
+                f"area_ratio={float(area_ratio) if area_ratio is not None else None}  "
+                f"bbox_xyxy={bbox}  fallback_rect={is_fallback_rect}"
+            )
+            if is_fallback_rect:
+                console.print(
+                    "[yellow][mode-b] Rejecting fallback rectangular mask (segmentation failed).[/]"
+                )
+                continue
             if int(seg.mask_erode_iters) > 0:
                 from scipy.ndimage import binary_erosion
 
                 mask = binary_erosion(mask, iterations=int(seg.mask_erode_iters))
             depth = np.load(render_dir / f"depth_{stem}.npy")
+            stats_n: dict[str, int | float] = {}
+            stats_d: dict[str, int | float] = {}
             idx_n = mask_to_gaussian_indices(
                 mask,
                 depth,
@@ -464,6 +557,7 @@ def mode_b(
                 distance_threshold=float(seg.mask_3d_distance_threshold_m),
                 stride=int(seg.mask_stride),
                 use_depth_consistency=False,
+                stats=stats_n,
             )
             idx_d = mask_to_gaussian_indices(
                 mask,
@@ -479,7 +573,32 @@ def mode_b(
                 knn=int(seg.mask_knn),
                 pixel_tolerance_px=float(seg.mask_pixel_tolerance_px),
                 min_votes=int(seg.mask_min_votes),
+                stats=stats_d,
             )
+            from segmentation.mask_to_gaussians import projection_stage_counts
+
+            ss = max(1, int(np.ceil(pos.shape[0] / 200_000)))
+            proj_counts = projection_stage_counts(mask, pos, K, w2c, subsample=ss)
+            console.print(
+                f"[mode-b proj] tested={proj_counts['tested']} (subsample={proj_counts['subsample']})  "
+                f"in_bounds={proj_counts['projected_in_bounds']}  inside_mask={proj_counts['projected_inside_mask']}  "
+                f"nearest_unique={int(stats_n.get('nearest_after_knn_unique', 0))}  "
+                f"depth_unique_after_votes={int(stats_d.get('depth_unique_after_vote_min_votes', 0))}"
+            )
+            if idx_n.size == 0 and int(stats_n.get("mask_true_pixels", 0)) > 0:
+                # If kNN-on-unprojected points returns empty (often due to depth=0 or too-tight distance),
+                # fall back to projection-only (no depth/knn) to avoid a hard 0-selection.
+                from segmentation.mask_to_gaussians import indices_project_inside_mask
+
+                idx_p = indices_project_inside_mask(mask, pos, K, w2c, subsample=1)
+                console.print(
+                    f"[mode-b] mask→3D nearest yielded 0 (mask_true={int(stats_n.get('mask_true_pixels', 0))}, "
+                    f"valid_z={int(stats_n.get('nearest_samples_valid_z', 0))}); "
+                    f"projection-only fallback={len(idx_p)}"
+                )
+                idx_n = idx_p
+                if idx_d.size == 0:
+                    idx_d = idx_p
             sets_nearest.append(idx_n)
             sets_depth.append(idx_d)
             if debug_selection:
@@ -503,6 +622,12 @@ def mode_b(
                 )
         _maybe_cuda_empty()
         gc.collect()
+
+        if not sets_nearest or not sets_depth:
+            raise typer.BadParameter(
+                "No valid segmentation views (all masks were fallback rectangles or rejected). "
+                "Try --sam2-render-camera-only/--render-camera-index or increase multi_view_count."
+            )
 
         idx_nearest_consensus = consensus_indices(sets_nearest, min_votes=seg.consensus_min_votes)
         idx_surface = consensus_indices(sets_depth, min_votes=seg.consensus_min_votes)
@@ -560,7 +685,7 @@ def mode_b(
         console.print(
             f"Bbox expand: {len(idx_bbox)} Gaussians  xyz min={lo_b.tolist()} max={hi_b.tolist()}"
         )
-        r_shell = cfg.physics.mode_b_shell_radius_m if shell_radius_m is None else float(shell_radius_m)
+        r_shell = phys.mode_b_shell_radius_m if shell_radius_m is None else float(shell_radius_m)
         if r_shell > 0.0:
             idx_shell = filter_expanded_to_shell_around_surface(pos, idx_surface, idx_bbox, r_shell)
             console.print(
@@ -578,14 +703,14 @@ def mode_b(
             pos,
             idx_shell,
             idx_surface,
-            float(cfg.physics.mode_b_cc_link_radius_m),
+            float(phys.mode_b_cc_link_radius_m),
         )
         if idx_cc.size == 0:
             console.print("[yellow]Connected-component filter removed all points; using shell set.[/]")
             idx_cc = idx_shell
         else:
             console.print(
-                f"Connected-component (seeds, r={cfg.physics.mode_b_cc_link_radius_m:g} m): "
+                f"Connected-component (seeds, r={phys.mode_b_cc_link_radius_m:g} m): "
                 f"{len(idx_shell)} → {len(idx_cc)} Gaussians"
             )
         lo_cc, hi_cc = selection_xyz_bounds(pos, idx_cc)
@@ -594,7 +719,7 @@ def mode_b(
         )
 
         idx = idx_cc
-    opacity_floor = cfg.physics.mode_b_opacity_logit_min
+    opacity_floor = phys.mode_b_opacity_logit_min
     if opacity_floor is not None:
         logits = read_ply_opacity_logits(ply_path)
         n_op = len(idx)
@@ -613,6 +738,11 @@ def mode_b(
     console.print(
         f"[mode-b] saved [cyan]{sim_indices_path}[/] + [cyan]{selected_indices_path}[/]  "
         f"n_indices={len(idx)} (wobble/MPM use this set)",
+    )
+    console.print(
+        f"[mode-b debug] final_selection_count={len(idx)}  "
+        f"surface_count={len(idx_surface) if idx_surface is not None else 'None'}  "
+        f"out_dir={mode_b_out}"
     )
 
     dbg = mode_b_out / "debug"
@@ -674,7 +804,7 @@ def mode_b(
                     f"view150={int(ns.get(150, 0))}, best_cam={best_cam_idx} → {visb}"
                 )
                 if require_visual_selection:
-                    mn = int(cfg.physics.mode_b_min_visible_selected)
+                    mn = int(phys.mode_b_min_visible_selected)
                     if visb < mn:
                         raise typer.BadParameter(
                             f"Selection visual check failed: best camera only sees {visb} selected "
@@ -746,7 +876,7 @@ def mode_b(
         except Exception as exc:  # noqa: BLE001
             console.print(f"[yellow]render_camera_rgb preview skipped: {exc}[/]")
 
-    w_amp_kinematic = float(cfg.physics.mode_b_kinematic_wobble_amp)
+    w_amp_kinematic = float(phys.mode_b_kinematic_wobble_amp)
     if wobble_amp is not None:
         w_amp_kinematic = float(wobble_amp)
         console.print(f"[mode-b] kinematic wobble amp override: [bold]{w_amp_kinematic}[/] m")
@@ -759,8 +889,8 @@ def mode_b(
     )
 
     if kinematic_wobble:
-        fnum = cfg.physics.frame_num_test if smoke else cfg.physics.frame_num
-        playback = cfg.physics.compile_video_playback_sec
+        fnum = phys.frame_num_test if smoke else phys.frame_num
+        playback = phys.compile_video_playback_sec
         console.print(
             f"[mode-b kinematic] loading indices from in-memory selection n={len(idx)}  "
             f"(same as [cyan]{selected_indices_path}[/] just written)",
@@ -773,28 +903,35 @@ def mode_b(
             object_indices=idx,
             sim_run=mode_b_out,
             frame_num=int(fnum),
-            frame_dt=float(cfg.physics.frame_dt),
+            frame_dt=float(phys.frame_dt),
             playback_seconds=float(playback if playback is not None else 10.0),
             camera_index=render_camera_index,
             wobble_amp=w_amp_kinematic,
-            wobble_frequency=float(cfg.physics.mode_b_kinematic_wobble_freq_hz),
-            wobble_height_weight=float(cfg.physics.mode_b_kinematic_wobble_height_gamma),
-            wobble_bottom_pin=float(cfg.physics.mode_b_kinematic_wobble_bottom_pin),
+            wobble_frequency=float(phys.mode_b_kinematic_wobble_freq_hz),
+            wobble_height_weight=float(phys.mode_b_kinematic_wobble_height_gamma),
+            wobble_bottom_pin=float(phys.mode_b_kinematic_wobble_bottom_pin),
             track_debug=wobble_track_debug,
             indices_source=str(selected_indices_path.resolve()),
         )
         console.print(f"Video (kinematic): [green]{vid}[/]")
         return
 
+    if len(idx) == 0:
+        raise typer.BadParameter(
+            "Empty selection (0 Gaussians). Segmentation likely failed or mask→3D projection returned nothing. "
+            "In your log, Grounded-SAM-2 fell back due to missing files. "
+            "Fix submodules/checkpoints, then rerun (use --no-reuse-selection to avoid stale caches)."
+        )
+
     sim_cfg = mode_b_out / "phys_config.json"
-    sim_n_grid = int(cfg.physics.n_grid_low if smoke else cfg.physics.n_grid)
-    sim_frame_num = int(cfg.physics.mode_b_mpm_smoke_frames if smoke else cfg.physics.frame_num)
+    sim_n_grid = int(phys.n_grid_low if smoke else phys.n_grid)
+    sim_frame_num = int(phys.mode_b_mpm_smoke_frames if smoke else phys.frame_num)
     # Sustained wobble drives MPM physics time → match requested motion horizon to video/sim length.
-    if cfg.physics.mode_b_phys_sustained_wobble and not smoke:
-        motion_s = cfg.physics.mode_b_phys_wobble_motion_seconds
+    if phys.mode_b_phys_sustained_wobble and not smoke:
+        motion_s = phys.mode_b_phys_wobble_motion_seconds
         if motion_s is None:
-            motion_s = float(cfg.physics.compile_video_playback_sec)
-        tgt = int(math.ceil(float(motion_s) / float(cfg.physics.frame_dt)) + 2)
+            motion_s = float(phys.compile_video_playback_sec)
+        tgt = int(math.ceil(float(motion_s) / float(phys.frame_dt)) + 2)
         sim_frame_num = max(sim_frame_num, tgt)
     gc.collect()
     _log_cuda_memory_line(console, "[mode-b] PhysGaussian 직전 GPU")
@@ -805,129 +942,130 @@ def mode_b(
     support_y = estimate_mode_b_support_contact_y(
         pos,
         idx,
-        contact_percentile=float(cfg.physics.mode_b_support_contact_percentile),
+        contact_percentile=float(phys.mode_b_support_contact_percentile),
     )
     sim_margin = (
-        float(cfg.physics.mode_b_sim_area_margin)
-        if cfg.physics.mode_b_sim_area_margin is not None
-        else float(cfg.physics.sim_area_margin)
+        float(phys.mode_b_sim_area_margin)
+        if phys.mode_b_sim_area_margin is not None
+        else float(phys.sim_area_margin)
     )
     mat_b: dict[str, float] = {}
-    if cfg.physics.mode_b_jelly_E is not None:
-        mat_b["E"] = float(cfg.physics.mode_b_jelly_E)
-    if cfg.physics.mode_b_jelly_grid_v_damping_scale is not None:
-        mat_b["grid_v_damping_scale"] = float(cfg.physics.mode_b_jelly_grid_v_damping_scale)
+    if material_name == "jelly":
+        if phys.mode_b_jelly_E is not None:
+            mat_b["E"] = float(phys.mode_b_jelly_E)
+        if phys.mode_b_jelly_grid_v_damping_scale is not None:
+            mat_b["grid_v_damping_scale"] = float(phys.mode_b_jelly_grid_v_damping_scale)
     console.print(
         f"[mode-b] jelly in-place: support_contact_y={support_y:.4f} "
-        f"(pctl={cfg.physics.mode_b_support_contact_percentile})  "
+        f"(pctl={phys.mode_b_support_contact_percentile})  "
         f"selected bbox min={lo_i.tolist()} max={hi_i.tolist()}  "
         f"world_down=+scene_Y  mpm_world_up=(0,-1,0)  "
-        f"pin_com={cfg.physics.mode_b_pin_initial_com}  "
-        f"pin_vertical_only={cfg.physics.mode_b_pin_com_vertical_only}  "
-        f"shear_wobble={cfg.physics.mode_b_mpm_in_place_shear_wobble}  "
-        f"shear_full_vol={cfg.physics.mode_b_shear_wobble_full_volume}  "
-        f"sust_phys={cfg.physics.mode_b_phys_sustained_wobble}  "
-        f"sust_hz={cfg.physics.mode_b_phys_wobble_frequency_hz}  "
-        f"vx_peak={cfg.physics.mode_b_phys_wobble_velocity_peak_x or cfg.physics.mode_b_phys_wobble_velocity_peak}  "
-        f"vy_peak={cfg.physics.mode_b_phys_wobble_velocity_peak_y}  "
-        f"vz_peak={cfg.physics.mode_b_phys_wobble_velocity_peak_z}  "
-        f"d12=({cfg.physics.mode_b_phys_wobble_velocity_peak_diag1},"
-        f"{cfg.physics.mode_b_phys_wobble_velocity_peak_diag2})  "
-        f"twist_peak={cfg.physics.mode_b_phys_wobble_velocity_peak_twist}  "
+        f"pin_com={phys.mode_b_pin_initial_com}  "
+        f"pin_vertical_only={phys.mode_b_pin_com_vertical_only}  "
+        f"shear_wobble={phys.mode_b_mpm_in_place_shear_wobble}  "
+        f"shear_full_vol={phys.mode_b_shear_wobble_full_volume}  "
+        f"sust_phys={phys.mode_b_phys_sustained_wobble}  "
+        f"sust_hz={phys.mode_b_phys_wobble_frequency_hz}  "
+        f"vx_peak={phys.mode_b_phys_wobble_velocity_peak_x or phys.mode_b_phys_wobble_velocity_peak}  "
+        f"vy_peak={phys.mode_b_phys_wobble_velocity_peak_y}  "
+        f"vz_peak={phys.mode_b_phys_wobble_velocity_peak_z}  "
+        f"d12=({phys.mode_b_phys_wobble_velocity_peak_diag1},"
+        f"{phys.mode_b_phys_wobble_velocity_peak_diag2})  "
+        f"twist_peak={phys.mode_b_phys_wobble_velocity_peak_twist}  "
         f"frames={sim_frame_num}  "
         f"sim_margin={sim_margin}  "
         f"E={mat_b.get('E', 'preset')}  "
-        f"shear_v={cfg.physics.mode_b_shear_wobble_velocity}  "
-        f"shear_t={cfg.physics.mode_b_shear_wobble_end_time}s  "
-        f"disp_retention={cfg.physics.mode_b_mpm_displacement_retention}  "
-        f"kabsch_strip={cfg.physics.mode_b_mpm_kabsch_rigid_strip}  "
-        f"kabsch_amp={cfg.physics.mode_b_mpm_kabsch_elastic_amp}  "
-        f"anchor_feet_y_pctl={cfg.physics.mode_b_mpm_anchor_feet_y_percentile}  "
-        f"shear_symmetric_lr={cfg.physics.mode_b_mpm_shear_symmetric_lr_split}  "
-        f"tilt_diag={cfg.physics.mode_b_mpm_tilt_diagnostics}  "
-        f"freeze_cov_render={cfg.physics.mode_b_render_freeze_gaussian_cov}"
+        f"shear_v={phys.mode_b_shear_wobble_velocity}  "
+        f"shear_t={phys.mode_b_shear_wobble_end_time}s  "
+        f"disp_retention={phys.mode_b_mpm_displacement_retention}  "
+        f"kabsch_strip={phys.mode_b_mpm_kabsch_rigid_strip}  "
+        f"kabsch_amp={phys.mode_b_mpm_kabsch_elastic_amp}  "
+        f"anchor_feet_y_pctl={phys.mode_b_mpm_anchor_feet_y_percentile}  "
+        f"shear_symmetric_lr={phys.mode_b_mpm_shear_symmetric_lr_split}  "
+        f"tilt_diag={phys.mode_b_mpm_tilt_diagnostics}  "
+        f"freeze_cov_render={phys.mode_b_render_freeze_gaussian_cov}"
     )
     generate_phys_config(
         idx,
         pos,
-        "jelly",
+        material_name,
         sim_cfg,
         template_path=default_template_dir() / "jelly.json",
         n_grid=sim_n_grid,
         frame_num=sim_frame_num,
-        frame_dt=cfg.physics.frame_dt,
-        substep_dt=cfg.physics.substep_dt,
-        gravity=float(cfg.physics.gravity)
-        * float(cfg.physics.gravity_scale)
-        * float(cfg.physics.mode_b_jelly_gravity_mult),
+        frame_dt=phys.frame_dt,
+        substep_dt=phys.substep_dt,
+        gravity=float(phys.gravity)
+        * float(phys.gravity_scale)
+        * float(phys.mode_b_jelly_gravity_mult if material_name == "jelly" else 1.0),
         camera_index=render_camera_index,
         simulate_indices_npy=sim_indices_path,
         subtract_rigid_drift=False,
         floor_y=support_y,
         world_up=(0.0, -1.0, 0.0),
         floor_collider=True,
-        floor_friction=float(cfg.physics.floor_friction),
-        in_place_wobble=bool(cfg.physics.mode_b_mpm_in_place_shear_wobble),
-        wobble_velocity=float(cfg.physics.mode_b_shear_wobble_velocity),
-        wobble_end_time=float(cfg.physics.mode_b_shear_wobble_end_time),
-        shear_wobble_full_volume=bool(cfg.physics.mode_b_shear_wobble_full_volume),
-        pin_initial_com_mpm=bool(cfg.physics.mode_b_pin_initial_com),
-        pin_com_vertical_only=bool(cfg.physics.mode_b_pin_com_vertical_only),
-        pin_zero_mean_velocity_gs=bool(cfg.physics.mode_b_pin_zero_mean_velocity_gs),
+        floor_friction=float(phys.floor_friction),
+        in_place_wobble=bool(phys.mode_b_mpm_in_place_shear_wobble),
+        wobble_velocity=float(phys.mode_b_shear_wobble_velocity),
+        wobble_end_time=float(phys.mode_b_shear_wobble_end_time),
+        shear_wobble_full_volume=bool(phys.mode_b_shear_wobble_full_volume),
+        pin_initial_com_mpm=bool(phys.mode_b_pin_initial_com),
+        pin_com_vertical_only=bool(phys.mode_b_pin_com_vertical_only),
+        pin_zero_mean_velocity_gs=bool(phys.mode_b_pin_zero_mean_velocity_gs),
         mode_b_mpm_displacement_retention=(
-            float(cfg.physics.mode_b_mpm_displacement_retention)
-            if cfg.physics.mode_b_mpm_displacement_retention is not None
+            float(phys.mode_b_mpm_displacement_retention)
+            if phys.mode_b_mpm_displacement_retention is not None
             else None
         ),
-        mode_b_render_freeze_gaussian_cov=bool(cfg.physics.mode_b_render_freeze_gaussian_cov),
-        mode_b_mpm_kabsch_rigid_strip=bool(cfg.physics.mode_b_mpm_kabsch_rigid_strip),
-        mode_b_mpm_kabsch_elastic_amp=float(cfg.physics.mode_b_mpm_kabsch_elastic_amp),
+        mode_b_render_freeze_gaussian_cov=bool(phys.mode_b_render_freeze_gaussian_cov),
+        mode_b_mpm_kabsch_rigid_strip=bool(phys.mode_b_mpm_kabsch_rigid_strip),
+        mode_b_mpm_kabsch_elastic_amp=float(phys.mode_b_mpm_kabsch_elastic_amp),
         mode_b_mpm_anchor_feet_y_percentile=(
-            float(cfg.physics.mode_b_mpm_anchor_feet_y_percentile)
-            if cfg.physics.mode_b_mpm_anchor_feet_y_percentile is not None
+            float(phys.mode_b_mpm_anchor_feet_y_percentile)
+            if phys.mode_b_mpm_anchor_feet_y_percentile is not None
             else None
         ),
-        shear_symmetric_lr_split=bool(cfg.physics.mode_b_mpm_shear_symmetric_lr_split),
-        phys_sustained_wobble=bool(cfg.physics.mode_b_phys_sustained_wobble),
-        phys_wobble_frequency_hz=float(cfg.physics.mode_b_phys_wobble_frequency_hz),
-        phys_wobble_velocity_peak=float(cfg.physics.mode_b_phys_wobble_velocity_peak),
+        shear_symmetric_lr_split=bool(phys.mode_b_mpm_shear_symmetric_lr_split),
+        phys_sustained_wobble=bool(phys.mode_b_phys_sustained_wobble),
+        phys_wobble_frequency_hz=float(phys.mode_b_phys_wobble_frequency_hz),
+        phys_wobble_velocity_peak=float(phys.mode_b_phys_wobble_velocity_peak),
         phys_wobble_velocity_peak_x=(
-            float(cfg.physics.mode_b_phys_wobble_velocity_peak_x)
-            if cfg.physics.mode_b_phys_wobble_velocity_peak_x is not None
+            float(phys.mode_b_phys_wobble_velocity_peak_x)
+            if phys.mode_b_phys_wobble_velocity_peak_x is not None
             else None
         ),
-        phys_wobble_velocity_peak_y=float(cfg.physics.mode_b_phys_wobble_velocity_peak_y),
-        phys_wobble_phase_y_rad=float(cfg.physics.mode_b_phys_wobble_phase_y),
-        phys_wobble_band_amp_x=cfg.physics.mode_b_phys_wobble_band_amp_x,
-        phys_wobble_band_amp_y=cfg.physics.mode_b_phys_wobble_band_amp_y,
-        phys_wobble_band_vy_polarity=cfg.physics.mode_b_phys_wobble_band_vy_polarity,
-        phys_wobble_band_phase_y_offset_rad=cfg.physics.mode_b_phys_wobble_band_phase_y_offset_rad,
-        phys_wobble_velocity_peak_z=float(cfg.physics.mode_b_phys_wobble_velocity_peak_z),
-        phys_wobble_velocity_peak_diag1=float(cfg.physics.mode_b_phys_wobble_velocity_peak_diag1),
-        phys_wobble_velocity_peak_diag2=float(cfg.physics.mode_b_phys_wobble_velocity_peak_diag2),
-        phys_wobble_velocity_peak_twist=float(cfg.physics.mode_b_phys_wobble_velocity_peak_twist),
-        phys_wobble_phase_z_rad=float(cfg.physics.mode_b_phys_wobble_phase_z),
-        phys_wobble_phase_diag1_rad=float(cfg.physics.mode_b_phys_wobble_phase_diag1_rad),
-        phys_wobble_phase_diag2_rad=float(cfg.physics.mode_b_phys_wobble_phase_diag2_rad),
-        phys_wobble_phase_twist_rad=float(cfg.physics.mode_b_phys_wobble_phase_twist_rad),
-        phys_wobble_bundle_quad_phase_rad=cfg.physics.mode_b_phys_wobble_bundle_quad_phase_rad,
-        phys_wobble_bundle_band_phase_rad=cfg.physics.mode_b_phys_wobble_bundle_band_phase_rad,
-        phys_wobble_band_amp_z=cfg.physics.mode_b_phys_wobble_band_amp_z,
-        phys_wobble_band_amp_diag1=cfg.physics.mode_b_phys_wobble_band_amp_diag1,
-        phys_wobble_band_amp_diag2=cfg.physics.mode_b_phys_wobble_band_amp_diag2,
-        phys_wobble_band_amp_twist=cfg.physics.mode_b_phys_wobble_band_amp_twist,
-        phys_wobble_force_scale=float(cfg.physics.mode_b_phys_wobble_force_scale),
-        phys_wobble_decay_lambda_per_s=float(cfg.physics.mode_b_phys_wobble_decay_lambda_per_s),
+        phys_wobble_velocity_peak_y=float(phys.mode_b_phys_wobble_velocity_peak_y),
+        phys_wobble_phase_y_rad=float(phys.mode_b_phys_wobble_phase_y),
+        phys_wobble_band_amp_x=phys.mode_b_phys_wobble_band_amp_x,
+        phys_wobble_band_amp_y=phys.mode_b_phys_wobble_band_amp_y,
+        phys_wobble_band_vy_polarity=phys.mode_b_phys_wobble_band_vy_polarity,
+        phys_wobble_band_phase_y_offset_rad=phys.mode_b_phys_wobble_band_phase_y_offset_rad,
+        phys_wobble_velocity_peak_z=float(phys.mode_b_phys_wobble_velocity_peak_z),
+        phys_wobble_velocity_peak_diag1=float(phys.mode_b_phys_wobble_velocity_peak_diag1),
+        phys_wobble_velocity_peak_diag2=float(phys.mode_b_phys_wobble_velocity_peak_diag2),
+        phys_wobble_velocity_peak_twist=float(phys.mode_b_phys_wobble_velocity_peak_twist),
+        phys_wobble_phase_z_rad=float(phys.mode_b_phys_wobble_phase_z),
+        phys_wobble_phase_diag1_rad=float(phys.mode_b_phys_wobble_phase_diag1_rad),
+        phys_wobble_phase_diag2_rad=float(phys.mode_b_phys_wobble_phase_diag2_rad),
+        phys_wobble_phase_twist_rad=float(phys.mode_b_phys_wobble_phase_twist_rad),
+        phys_wobble_bundle_quad_phase_rad=phys.mode_b_phys_wobble_bundle_quad_phase_rad,
+        phys_wobble_bundle_band_phase_rad=phys.mode_b_phys_wobble_bundle_band_phase_rad,
+        phys_wobble_band_amp_z=phys.mode_b_phys_wobble_band_amp_z,
+        phys_wobble_band_amp_diag1=phys.mode_b_phys_wobble_band_amp_diag1,
+        phys_wobble_band_amp_diag2=phys.mode_b_phys_wobble_band_amp_diag2,
+        phys_wobble_band_amp_twist=phys.mode_b_phys_wobble_band_amp_twist,
+        phys_wobble_force_scale=float(phys.mode_b_phys_wobble_force_scale),
+        phys_wobble_decay_lambda_per_s=float(phys.mode_b_phys_wobble_decay_lambda_per_s),
         phys_wobble_duration_s=(
-            float(cfg.physics.mode_b_phys_wobble_duration_s)
-            if cfg.physics.mode_b_phys_wobble_duration_s is not None
+            float(phys.mode_b_phys_wobble_duration_s)
+            if phys.mode_b_phys_wobble_duration_s is not None
             else None
         ),
-        phys_wobble_ramp_time_s=float(cfg.physics.mode_b_phys_wobble_ramp_time_s),
-        mode_b_mpm_tilt_diagnostics=bool(cfg.physics.mode_b_mpm_tilt_diagnostics),
-        mode_b_mpm_tilt_top_y_percentile=float(cfg.physics.mode_b_mpm_tilt_top_y_percentile),
+        phys_wobble_ramp_time_s=float(phys.mode_b_phys_wobble_ramp_time_s),
+        mode_b_mpm_tilt_diagnostics=bool(phys.mode_b_mpm_tilt_diagnostics),
+        mode_b_mpm_tilt_top_y_percentile=float(phys.mode_b_mpm_tilt_top_y_percentile),
         material_overrides=mat_b if mat_b else None,
-        enable_internal_particle_fill=cfg.physics.enable_mpm_particle_filling,
+        enable_internal_particle_fill=phys.enable_mpm_particle_filling,
         sim_area_margin=sim_margin,
         particle_filling={
             "n_grid": min(50, sim_n_grid),
@@ -943,7 +1081,7 @@ def mode_b(
         str(sim_cfg),
         str(mode_b_out),
         camera_scene_path=str(model_out),
-        playback_seconds=cfg.physics.compile_video_playback_sec,
+        playback_seconds=phys.compile_video_playback_sec,
         taichi_device_memory_gb=_taichi_gb,
     )
     dbg_js = mode_b_out / "frames" / "mode_b_mpm_debug.json"

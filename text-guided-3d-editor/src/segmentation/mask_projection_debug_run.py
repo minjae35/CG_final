@@ -30,6 +30,7 @@ def run_mask_projection_debug(
     *,
     cfg: PipelineConfig,
     text: str,
+    mode_b_out: Path | None = None,
     smoke: bool,
     smoke_3dgs: bool,
     force_rerender_views: bool,
@@ -57,7 +58,7 @@ def run_mask_projection_debug(
     if not ply_path.is_file():
         raise typer.BadParameter(f"Missing {ply_path}; run ``train`` (or ``train --smoke``) first.")
 
-    mode_b_out = cfg.resolve(cfg.paths.sim_output) / "mode_b_jelly"
+    mode_b_out = mode_b_out or (cfg.resolve(cfg.paths.sim_output) / "mode_b_jelly")
     out = mode_b_out / "debug_selection"
     if out.is_dir():
         shutil.rmtree(out)
@@ -111,6 +112,7 @@ def run_mask_projection_debug(
     )
 
     _lap("Grounded SAM2 + DINO (모델 로딩에 수십 초~분 단위 가능) …")
+    mask_info: dict = {}
     mask = text_to_mask(
         str(rgb_path),
         text,
@@ -121,9 +123,18 @@ def run_mask_projection_debug(
         sam2_config=seg.sam2_config or None,
         sam2_checkpoint=seg.sam2_checkpoint or None,
         device=seg.segmentation_device,
+        allow_cpu_fallback=bool(getattr(seg, "allow_cpu_fallback", False)),
         debug_mask_dir=None,
         log_progress=True,
+        debug_info=mask_info,
     )
+    if bool(mask_info.get("is_fallback_rect", False)):
+        # This debug bundle is meant to validate selection quality; a silent centre-rect fallback
+        # makes every prompt look "the same" and hides the real error.
+        raise typer.BadParameter(
+            "Grounded-SAM2 failed and returned fallback rectangular mask. "
+            f"exception={mask_info.get('exception_repr')}"
+        )
     _lap(f"세그멘테이션 마스크 완료  true_pixels={int(mask.sum())}")
     if int(seg.mask_erode_iters) > 0 and not debug_mask_to_gaussians_only:
         from scipy.ndimage import binary_erosion

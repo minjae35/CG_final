@@ -47,6 +47,22 @@ placement:
   surface_search_radius: 0.5
   opacity_threshold: 0.5
 
+mode_b_presets:
+  desk_jelly:
+    selection_prompt: "wooden desk in the forefront"
+    physics_type: "jelly"
+    output_subdir: "mode_b_jelly"
+    physics_overrides: {}
+  footrest_sand:
+    selection_prompt: "blue armchair in the back center"
+    physics_type: "sand"
+    output_subdir: "mode_b_sand"
+    physics_overrides:
+      # Sand tends to explode under strong jelly wobble BCs; disable in-place shear wobble by default.
+      mode_b_mpm_in_place_shear_wobble: false
+      mode_b_phys_sustained_wobble: false
+      mode_b_render_freeze_gaussian_cov: true
+
 physics:
   n_grid: 100
   n_grid_low: 40       # used with mode-b --smoke (MPM grid); lower = less Taichi/Warp VRAM
