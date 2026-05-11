@@ -13,6 +13,8 @@ cd text-guided-3d-editor
 export PYTHONPATH=src
 python src/pipeline.py mode-b "wooden table in the foreground" --no-debug-selection
 
+# ===================================================================================================
+### < preset >
 # 3DGS만 smoke, 물리/영상은 full로 하고 싶으면? (Mode-b "wooden desk in the forefront" – Jelly Physics)
 python src/pipeline.py mode-b --smoke-3dgs --no-debug-selection --preset desk_jelly
 # 내부적으로 자동으로 아래를 사용함.

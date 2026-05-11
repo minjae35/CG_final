@@ -22,9 +22,9 @@ MATERIAL_PRESETS: dict[str, dict[str, Any]] = {
     },
     "metal": {
         "material": "metal",
-        "E": 5e5,
-        "nu": 0.35,
-        "density": 7800,
+        "E": 1e7,
+        "nu": 0.30,
+        "density": 1200,
     },
     "rigid": {
         "material": "metal",
@@ -42,9 +42,11 @@ MATERIAL_PRESETS: dict[str, dict[str, Any]] = {
     },
     "foam": {
         "material": "foam",
-        "E": 1e3,
+        "E": 2e5,
         "nu": 0.25,
-        "density": 200,
+        "density": 250,
+        "yield_stress": 3e4,
+        "grid_v_damping_scale": 0.9988,
     },
 }
 

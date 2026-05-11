@@ -2948,6 +2948,10 @@ def mode_a(
     phys_input_ply = phys_input_dir / "point_cloud" / "iteration_0" / "point_cloud.ply"
     phys_input_ply.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(merged, phys_input_ply)
+    cameras_json = model_out / "cameras.json"
+    if not cameras_json.is_file():
+        raise FileNotFoundError(cameras_json)
+    shutil.copy2(cameras_json, phys_input_dir / "cameras.json")
     console.print(
         f"[mode-a] PhysGaussian input checkpoint: [cyan]{phys_input_dir.resolve()}[/] "
         f"(staged from {merged.resolve()})"

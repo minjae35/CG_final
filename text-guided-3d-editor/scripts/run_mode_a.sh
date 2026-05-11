@@ -18,18 +18,22 @@ python src/pipeline.py mode-a "yellow rubber duck" --smoke --full-sds \
 # ============================================================================================
 ### < PhysGaussian > — MPM (Material Point Method)
 # MPM을 이용해서 시뮬레이션 하는 방식이라고 생각하면 됨.
+# < metal > - 값을 너무 단단하게 하면 자꾸 터져서, 포기함.
 python src/pipeline.py mode-a "yellow rubber duck" --smoke --full-sds \
   --object-gaussians /home/bgh1225/CG_final/text-guided-3d-editor/output/generated_objects/sds_run/object_mesh_gaussians.ply \
   --material metal --no-auto-realism
 
+# < Sand >
 python src/pipeline.py mode-a "yellow rubber duck" --smoke --full-sds \
   --object-gaussians /home/bgh1225/CG_final/text-guided-3d-editor/output/generated_objects/sds_run/object_mesh_gaussians.ply \
   --material sand --no-auto-realism
 
+# < Foam >
 python src/pipeline.py mode-a "yellow rubber duck" --smoke --full-sds \
   --object-gaussians /home/bgh1225/CG_final/text-guided-3d-editor/output/generated_objects/sds_run/object_mesh_gaussians.ply \
   --material foam --no-auto-realism
 
+# < Jelly >
 python src/pipeline.py mode-a "yellow rubber duck" --smoke --full-sds \
   --object-gaussians /home/bgh1225/CG_final/text-guided-3d-editor/output/generated_objects/sds_run/object_mesh_gaussians.ply \
   --material jelly --no-auto-realism

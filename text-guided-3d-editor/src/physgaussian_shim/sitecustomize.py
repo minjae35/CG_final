@@ -9,6 +9,121 @@ submodule source files.
 from __future__ import annotations
 
 
+def _patch_simulate_indices_selection() -> None:
+    """Use ``simulate_indices_npy`` as an exact PhysGaussian dynamic subset.
+
+    Upstream ``gs_simulation.py`` only uses ``sim_area`` as a bbox selector.  For
+    mode-a, that bbox can include rug/floor Gaussians near the inserted object.
+    This shim keeps the upstream bbox code as a fallback, but when
+    ``simulate_indices_npy`` is present it changes the bbox mask's initial value
+    from "all True" to the exact post-opacity selected-index mask.  The existing
+    bbox comparisons can only remove points from that set, never add carpet.
+    """
+    import builtins
+    import json
+    import os
+    from pathlib import Path
+
+    cfg_path = os.environ.get("PHYSGAUSSIAN_CONFIG_PATH")
+    if not cfg_path:
+        return
+    try:
+        cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    sim_npy = cfg.get("simulate_indices_npy")
+    if not sim_npy:
+        return
+
+    try:
+        import numpy as np
+        import torch
+    except Exception:
+        return
+
+    try:
+        idx_np = np.load(sim_npy).astype(np.int64, copy=False).ravel()
+    except Exception:
+        return
+    if idx_np.size == 0:
+        return
+
+    opacity_threshold = float(cfg.get("opacity_threshold", 0.02))
+    state = {
+        "mask_after_opacity": None,
+        "used_for_bbox": False,
+    }
+
+    orig_ones = torch.ones
+
+    def _ones_wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+        exact = state.get("mask_after_opacity")
+        dtype = kwargs.get("dtype", None)
+        try:
+            requested_n = int(args[0]) if len(args) >= 1 else -1
+        except Exception:
+            requested_n = -1
+        if (
+            exact is not None
+            and not bool(state.get("used_for_bbox", False))
+            and dtype is torch.bool
+            and requested_n == int(exact.shape[0])
+        ):
+            state["used_for_bbox"] = True
+            print(
+                "[physgaussian_shim] simulate_indices_npy exact selection active: "
+                f"dynamic={int(exact.sum())} total_after_opacity={int(exact.shape[0])}",
+                flush=True,
+            )
+            return torch.as_tensor(exact, dtype=torch.bool)
+        return orig_ones(*args, **kwargs)
+
+    torch.ones = _ones_wrapper  # type: ignore[assignment]
+
+    orig_import = builtins.__import__
+
+    def _import_hook(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+        mod = orig_import(name, globals, locals, fromlist, level)
+        try:
+            if name == "utils.render_utils":
+                fn = getattr(mod, "load_params_from_gs", None)
+                if callable(fn) and getattr(fn, "__name__", "") != "_wrapped_load_params_from_gs":
+
+                    def _wrapped_load_params_from_gs(*args, **kwargs):  # type: ignore[no-untyped-def]
+                        params = fn(*args, **kwargs)
+                        try:
+                            opacity = params.get("opacity")
+                            if not isinstance(opacity, torch.Tensor):
+                                return params
+                            keep = (opacity[:, 0] > opacity_threshold).detach().cpu().numpy()
+                            total = int(keep.shape[0])
+                            valid = idx_np[(idx_np >= 0) & (idx_np < total)]
+                            selected_global = np.zeros(total, dtype=bool)
+                            selected_global[valid] = True
+                            exact = selected_global[keep]
+                            state["mask_after_opacity"] = exact
+                            print(
+                                "[physgaussian_shim] loaded simulate_indices_npy: "
+                                f"path={sim_npy} selected_global={int(selected_global.sum())} "
+                                f"selected_after_opacity={int(exact.sum())} total_after_opacity={int(exact.shape[0])}",
+                                flush=True,
+                            )
+                        except Exception as exc:
+                            print(
+                                f"[physgaussian_shim] simulate_indices_npy exact selection disabled: {exc!r}",
+                                flush=True,
+                            )
+                        return params
+
+                    mod.load_params_from_gs = _wrapped_load_params_from_gs  # type: ignore[assignment]
+        except Exception:
+            pass
+        return mod
+
+    builtins.__import__ = _import_hook  # type: ignore[assignment]
+
+
 def _patch_mode_b_sand_render_override() -> None:
     """
     Sand mode rendering fix (main repo only).
@@ -832,6 +947,7 @@ def _patch_taichi_init_device_memory() -> None:
     ti.init = _init_wrapper  # type: ignore[assignment]
 
 
+_patch_simulate_indices_selection()
 _patch_diff_gaussian_rasterization()
 _patch_taichi_init_device_memory()
 _patch_mode_b_sand_render_override()

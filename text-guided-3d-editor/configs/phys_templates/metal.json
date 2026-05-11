@@ -1,11 +1,11 @@
 {
   "material": "metal",
-  "E": 500000,
-  "nu": 0.35,
-  "density": 7800,
+  "E": 10000000,
+  "nu": 0.30,
+  "density": 1200,
   "opacity_threshold": 0.02,
   "rotation_degree": [0.0],
   "rotation_axis": [0],
-  "grid_v_damping_scale": 0.9999,
-  "yield_stress": 1000.0
+  "grid_v_damping_scale": 0.9995,
+  "yield_stress": 1000000000.0
 }
