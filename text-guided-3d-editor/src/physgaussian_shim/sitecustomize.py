@@ -18,6 +18,9 @@ def _patch_simulate_indices_selection() -> None:
     ``simulate_indices_npy`` is present it changes the bbox mask's initial value
     from "all True" to the exact post-opacity selected-index mask.  The existing
     bbox comparisons can only remove points from that set, never add carpet.
+
+    The legacy desk_jelly mode-b preset intentionally opts out so changing only
+    its output folder does not change its original PhysGaussian sim_area behavior.
     """
     import builtins
     import json
@@ -30,6 +33,9 @@ def _patch_simulate_indices_selection() -> None:
     try:
         cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
     except Exception:
+        return
+
+    if cfg.get("disable_exact_simulate_indices_for_preset") == "desk_jelly":
         return
 
     sim_npy = cfg.get("simulate_indices_npy")

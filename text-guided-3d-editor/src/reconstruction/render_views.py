@@ -116,7 +116,7 @@ def render_training_views(
     dataset, pipe, _args = _load_render_args(model_path, colmap_scene, iteration, images=images)
 
     print(
-        "[render_training_views] GaussianModel + Scene 로드 중 (체크포인트 크면 여기서 오래 걸림) …",
+        "[render_training_views] Loading GaussianModel + Scene (large checkpoints may take a while) ...",
         flush=True,
     )
     with torch.no_grad():

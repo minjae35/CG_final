@@ -15,22 +15,24 @@ python src/pipeline.py mode-b "wooden table in the foreground" --no-debug-select
 
 # ===================================================================================================
 ### < preset >
+### < wooden desk in the forefront > - Kinematic wobble 
 # 3DGS만 smoke, 물리/영상은 full로 하고 싶으면? (Mode-b "wooden desk in the forefront" – Jelly Physics)
-python src/pipeline.py mode-b --smoke-3dgs --no-debug-selection --preset desk_jelly
+python src/pipeline.py mode-b --smoke-3dgs --preset desk_jelly --no-debug-selection
 # 내부적으로 자동으로 아래를 사용함.
 # prompt = "wooden desk in the forefront"
 # physics_type = "jelly"
 # output = output/sim_results/mode_b_jelly
 
-
+### < blue armchair in the back center > - Kinematic wobble
 # 3DGS만 smoke, 물리/영상은 full로 하고 싶으면? (Mode-b "blue armchair in the back center" – Sand Physics)
-python src/pipeline.py mode-b --smoke-3dgs --preset footrest_sand --no-debug-selection
-python src/pipeline.py mode-b --smoke-3dgs --preset footrest_sand
-python src/pipeline.py mode-b --smoke-3dgs --preset footrest_sand --no-reuse-selection
-python src/pipeline.py mode-b --smoke-3dgs --preset footrest_sand --reuse-selection --no-debug-selection
+python src/pipeline.py mode-b --smoke-3dgs --preset armchair_jelly --no-debug-selection
+python src/pipeline.py mode-b --smoke-3dgs --preset armchair_jelly
+python src/pipeline.py mode-b --smoke-3dgs --preset armchair_jelly --no-reuse-selection
+python src/pipeline.py mode-b --smoke-3dgs --preset armchair_jelly --reuse-selection --no-debug-selection
 # 내부적으로 자동으로 아래를 사용함.
 # prompt = "blue armchair in the back center"
-# physics_type = "sand"
+# physics_type = "jelly"
 # output = output/sim_results/mode_b_sand
+
 
 # ============================================================================================

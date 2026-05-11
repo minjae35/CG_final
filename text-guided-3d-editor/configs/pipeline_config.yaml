@@ -55,49 +55,28 @@ mode_b_presets:
   desk_jelly:
     selection_prompt: "wooden desk in the forefront"
     physics_type: "jelly"
-    output_subdir: "mode_b_jelly"
+    output_subdir: "mode_b_desk_jelly"
     physics_overrides: {}
-  footrest_sand:
+  armchair_jelly:
     selection_prompt: "blue armchair in the back center"
-    physics_type: "sand"
-    output_subdir: "mode_b_sand"
-    # This preset is typically used in smoke runs (fast selection + debug).
-    use_smoke_3dgs: true
+    physics_type: "jelly"
+    output_subdir: "mode_b_armchair_jelly"
     physics_overrides:
-      # Sand tends to explode under strong jelly wobble BCs; disable in-place shear wobble by default.
-      mode_b_mpm_in_place_shear_wobble: false
-      mode_b_phys_sustained_wobble: false
-      mode_b_render_freeze_gaussian_cov: false
-      # Sand: allow bulk settling/sinking. COM/feet pinning can freeze most of the object.
-      mode_b_pin_initial_com: false
-      mode_b_pin_zero_mean_velocity_gs: false
-      mode_b_mpm_anchor_feet_y_percentile: null
-      # Sand render appearance override is currently disabled (not fixing localized collapse).
-      mode_b_sand_render_override: false
-      # Sand motion correction (means3D-only at render time): enforce coherent global settling.
-      mode_b_sand_motion_correction: true
-      mode_b_sand_motion_alpha: 0.72
-      mode_b_sand_global_dy_percentile: 60.0
-      mode_b_sand_min_dy_as_global_frac: 0.20
-      # Fix root cause: complete selection using mask projection in the chosen camera.
+      # Chair geometry is fragmented in 3DGS; keep multiple mask-confirmed
+      # components so the backrest is not dropped by single-component CC.
+      mode_b_cc_keep_strategy: "mask_components"
+      mode_b_cc_mask_score_min: 0.01
+      mode_b_cc_max_components: 8
       mode_b_selection_completion_enabled: true
       mode_b_selection_completion_aabb_expand_ratio: 0.12
-      # Conservative completion: keep wall/window out.
       mode_b_selection_completion_max_add: 25000
-      mode_b_selection_completion_mask_dilate_px: 8
-      mode_b_selection_completion_neighbor_radius_m: 0.28
-      # Chair selections can be fragmented (seat vs backrest). Keep multiple components that actually
-      # overlap the SAM mask (with depth gate) instead of keeping only a single largest component.
-      mode_b_cc_keep_strategy: "mask_components"
-      mode_b_cc_mask_score_min: 0.02
-      mode_b_cc_max_components: 4
-      # Post-completion prune to remove window/background contamination.
+      mode_b_selection_completion_mask_dilate_px: 5
+      mode_b_selection_completion_neighbor_radius_m: 0.24
       mode_b_selection_prune_enabled: true
-      mode_b_selection_prune_neighbor_radius_m: 0.16
-      mode_b_selection_prune_mask_dilate_px: 0
-      mode_b_selection_prune_depth_abs_m: 0.02
-      mode_b_selection_prune_depth_rel: 0.02
-      # Final video: PhysGaussian only → output/sim_results/mode_b_sand/video/output.mp4 (no plate compositing).
+      mode_b_selection_prune_neighbor_radius_m: 0.22
+      mode_b_selection_prune_mask_dilate_px: 2
+      mode_b_selection_prune_depth_abs_m: 0.04
+      mode_b_selection_prune_depth_rel: 0.03
 
   footrest_sand_disp_prop:
     selection_prompt: "blue armchair in the back center"

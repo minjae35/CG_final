@@ -207,14 +207,14 @@ def _log_cuda_memory_line(console: Console, label: str) -> None:
         import torch
 
         if not torch.cuda.is_available():
-            console.print(f"[dim]{label}[/] CUDA 없음")
+            console.print(f"[dim]{label}[/] CUDA unavailable")
             return
         dev = torch.cuda.current_device()
         if hasattr(torch.cuda, "mem_get_info"):
             free_b, total_b = torch.cuda.mem_get_info(dev)
             console.print(
-                f"[dim]{label}[/] CUDA 여유 [bold]{free_b // 1048576}[/] MiB / "
-                f"전체 {total_b // 1048576} MiB  (자세히: [cyan]nvidia-smi[/])"
+                f"[dim]{label}[/] CUDA free [bold]{free_b // 1048576}[/] MiB / "
+                f"total {total_b // 1048576} MiB  (details: [cyan]nvidia-smi[/])"
             )
         else:
             a = torch.cuda.memory_allocated(dev) // 1048576
@@ -223,7 +223,7 @@ def _log_cuda_memory_line(console: Console, label: str) -> None:
                 f"[dim]{label}[/] torch allocated≈{a} MiB  reserved≈{r} MiB  ([cyan]nvidia-smi[/])"
             )
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[dim]{label}[/] GPU 메모리 조회 실패 ({exc}); [cyan]nvidia-smi[/] 권장")
+        console.print(f"[dim]{label}[/] GPU memory query failed ({exc}); try [cyan]nvidia-smi[/]")
 
 
 @app.command()
@@ -545,11 +545,11 @@ def mode_b(
     mask_view_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
     if reuse_selection:
         # IMPORTANT: per-preset selection must not reuse the legacy global cache
-        # (it usually contains the desk selection). Only reuse that cache for the
-        # legacy desk_jelly path.
+        # (it usually contains the desk selection). Keep desk_jelly tied to that
+        # cache even if its output folder is renamed.
         cached_candidates: list[Path] = [surface_indices_path]
         global_cache = cfg.resolve("output/3d_gaussian_selection_debug/selected_indices.npy")
-        if resolved_out_subdir == "mode_b_jelly" and (preset is None or preset == "desk_jelly"):
+        if preset == "desk_jelly" or (resolved_out_subdir == "mode_b_jelly" and preset is None):
             cached_candidates.insert(0, global_cache)
         for cached in cached_candidates:
             if cached.is_file():
@@ -1089,7 +1089,7 @@ def mode_b(
     if selection_debug_used_cuda:
         gc.collect()
         _maybe_cuda_empty()
-        console.print("[dim]3DGS selection debug 후 gc + empty_cache[/]")
+        console.print("[dim]After 3DGS selection debug: gc + empty_cache[/]")
 
     render_camera_index = int(best_cam_idx)
     cam_src = "visibility suite (multi-cam best)"
@@ -1498,9 +1498,46 @@ def mode_b(
         "selected indices receive xyz offsets; the rest match the idle copy."
     )
 
-    if kinematic_wobble:
+    stable_jelly_kinematic_override = preset in {"desk_jelly", "armchair_jelly"}
+    if kinematic_wobble or stable_jelly_kinematic_override:
         fnum = phys.frame_num_test if smoke else phys.frame_num
         playback = phys.compile_video_playback_sec
+        wobble_freq_kinematic = float(phys.mode_b_kinematic_wobble_freq_hz)
+        wobble_height_kinematic = float(phys.mode_b_kinematic_wobble_height_gamma)
+        wobble_bottom_pin_kinematic = float(phys.mode_b_kinematic_wobble_bottom_pin)
+        if preset == "desk_jelly" and not kinematic_wobble:
+            w_amp_kinematic = 0.065
+            wobble_freq_kinematic = 1.35
+            wobble_height_kinematic = 2.3
+            wobble_bottom_pin_kinematic = 0.38
+            console.print(
+                "[mode-b kinematic] desk_jelly preset override: using stable in-place wobble "
+                "and skipping PhysGaussian/MPM."
+            )
+            console.print(
+                "[mode-b kinematic] desk_jelly wobble params: "
+                f"amp={w_amp_kinematic}m freq={wobble_freq_kinematic}Hz "
+                f"height_weight={wobble_height_kinematic} bottom_pin={wobble_bottom_pin_kinematic}"
+            )
+        elif preset == "armchair_jelly" and not kinematic_wobble:
+            w_amp_kinematic = 0.14
+            wobble_freq_kinematic = 1.35
+            wobble_height_kinematic = 1.35
+            wobble_bottom_pin_kinematic = 0.25
+            console.print(
+                "[preset=armchair_jelly] using isolated armchair_jelly kinematic wobble override",
+                markup=False,
+            )
+            console.print(
+                "[preset=armchair_jelly] selected_count="
+                f"{len(idx)} run_simulation_called=False",
+                markup=False,
+            )
+            console.print(
+                "[mode-b kinematic] armchair_jelly wobble params: "
+                f"amp={w_amp_kinematic}m freq={wobble_freq_kinematic}Hz "
+                f"height_weight={wobble_height_kinematic} bottom_pin={wobble_bottom_pin_kinematic}"
+            )
         console.print(
             f"[mode-b kinematic] loading indices from in-memory selection n={len(idx)}  "
             f"(same as [cyan]{selected_indices_path}[/] just written)",
@@ -1517,9 +1554,9 @@ def mode_b(
             playback_seconds=float(playback if playback is not None else 10.0),
             camera_index=render_camera_index,
             wobble_amp=w_amp_kinematic,
-            wobble_frequency=float(phys.mode_b_kinematic_wobble_freq_hz),
-            wobble_height_weight=float(phys.mode_b_kinematic_wobble_height_gamma),
-            wobble_bottom_pin=float(phys.mode_b_kinematic_wobble_bottom_pin),
+            wobble_frequency=wobble_freq_kinematic,
+            wobble_height_weight=wobble_height_kinematic,
+            wobble_bottom_pin=wobble_bottom_pin_kinematic,
             track_debug=wobble_track_debug,
             indices_source=str(selected_indices_path.resolve()),
         )
@@ -1544,7 +1581,7 @@ def mode_b(
         tgt = int(math.ceil(float(motion_s) / float(phys.frame_dt)) + 2)
         sim_frame_num = max(sim_frame_num, tgt)
     gc.collect()
-    _log_cuda_memory_line(console, "[mode-b] PhysGaussian 직전 GPU")
+    _log_cuda_memory_line(console, "[mode-b] GPU before PhysGaussian")
     _maybe_cuda_empty()
     # Mode-b jelly: support plane from the *selection* (+Y-down → high-Y percentile = contact).
     # PhysGaussian pins COM each frame (see gs_simulation + phys JSON) so the desk
@@ -1722,6 +1759,12 @@ def mode_b(
             "visualize": False,
         },
     )
+    if preset == "desk_jelly":
+        # Preserve the original desk_jelly PhysGaussian bbox/sim_area selection
+        # while allowing only its output folder to be renamed.
+        sj = json.loads(sim_cfg.read_text(encoding="utf-8"))
+        sj["disable_exact_simulate_indices_for_preset"] = "desk_jelly"
+        sim_cfg.write_text(json.dumps(sj, indent=2), encoding="utf-8")
     vid = run_simulation(
         str(ply_path),
         str(sim_cfg),
