@@ -2944,6 +2944,15 @@ def mode_a(
             )
         return
 
+    phys_input_dir = merged.parent / "mode_a_phys_input"
+    phys_input_ply = phys_input_dir / "point_cloud" / "iteration_0" / "point_cloud.ply"
+    phys_input_ply.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(merged, phys_input_ply)
+    console.print(
+        f"[mode-a] PhysGaussian input checkpoint: [cyan]{phys_input_dir.resolve()}[/] "
+        f"(staged from {merged.resolve()})"
+    )
+
     # Simulate ONLY the generated object Gaussians (indices [n_base, n_base+n_obj)).
     # Simulating the full merged PLY applies physics to the background scene, which
     # destroys the render.
@@ -3037,7 +3046,7 @@ def mode_a(
     if wobble_debug and not in_place_wobble:
         console.print("[yellow]--wobble-debug ignored[/] (requires --in-place-wobble).")
     vid = run_simulation(
-        str(merged),
+        str(phys_input_dir),
         str(sim_cfg),
         str(sim_run),
         camera_scene_path=str(model_out),

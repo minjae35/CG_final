@@ -31,4 +31,4 @@ python src/pipeline.py mode-b --smoke-3dgs --preset footrest_sand --reuse-select
 # physics_type = "sand"
 # output = output/sim_results/mode_b_sand
 
-
+# ============================================================================================
