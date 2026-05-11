@@ -15,7 +15,7 @@ from plyfile import PlyData
 from rich.console import Console
 
 # Run with: cd text-guided-3d-editor && PYTHONPATH=src python pipeline.py ...
-from config import PROJECT_ROOT, PipelineConfig
+from config import PROJECT_ROOT, PipelineConfig, get_sim_run_dir
 from data_utils.dataset_downloader import download_and_prepare
 from generation.mesh_placed_export import export_placed_dreamgaussian_mesh
 from generation.object_rescaler import rescale_object_ply_to_scene
@@ -89,6 +89,45 @@ def _read_training_cam_index_txt(p: Path) -> int | None:
         return int(p.read_text(encoding="utf-8").strip().split()[0])
     except (ValueError, IndexError):
         return None
+
+
+def _mode_b_cleanup_minimal_artifacts(mode_b_out: Path) -> None:
+    """Delete bulky mode-b intermediates; keep phys_config, indices, and main mp4s."""
+    video_dir = mode_b_out / "video"
+    keep_mp4 = {"output.mp4", "final_chair_only_collapse.mp4", "final_cleanup_fullframe.mp4"}
+    if video_dir.is_dir():
+        for p in list(video_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() == ".mp4" and p.name not in keep_mp4:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    for name in (
+        "debug",
+        "debug_selection",
+        "frames",
+        "masks_objmask",
+        # Keep matte compositing layers (foreground RGB, alpha, composite frames).
+        "frames_final_chair_only",
+        "frames_composited_objmask",
+    ):
+        shutil.rmtree(mode_b_out / name, ignore_errors=True)
+    for p in mode_b_out.glob("frames_composited_*"):
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+    for name in (
+        "render_camera_rgb.png",
+        "selected_red_overlay_training_cam.png",
+        "selection_trace.json",
+        "camera_usage.txt",
+        "surface_gaussian_indices.npy",
+    ):
+        q = mode_b_out / name
+        if q.is_file():
+            try:
+                q.unlink()
+            except OSError:
+                pass
 
 
 def _save_mode_a_review_checkpoint(
@@ -213,7 +252,12 @@ def train(
 ) -> None:
     cfg = PipelineConfig.load(config)
     colmap_scene = cfg.resolve(cfg.scene.data_root) / cfg.scene.scene_name
-    model_out = cfg.resolve(cfg.scene.model_output)
+    out_rel = (
+        str(cfg.scene.model_output_smoke or cfg.scene.model_output)
+        if smoke
+        else str(cfg.scene.model_output_full or cfg.scene.model_output)
+    )
+    model_out = cfg.resolve(out_rel)
     iters = cfg.scene.training_iterations_low if smoke else cfg.scene.training_iterations
     console.print(f"[bold]Training 3DGS[/] iters={iters}")
     ply = train_scene(colmap_scene, model_out, iterations=iters)
@@ -250,6 +294,23 @@ def mode_b(
         True,
         "--debug-selection/--no-debug-selection",
         help="Save bbox indices, selected-only PLY, selected_indices.npy, and optional CUDA frame-0 renders.",
+    ),
+    cc_bypass: bool = typer.Option(
+        False,
+        "--cc-bypass",
+        help="DIAGNOSTIC: skip CC filtering entirely (final selection = shell set, before completion).",
+    ),
+    cc_keep_topk: int | None = typer.Option(
+        None,
+        "--cc-keep-topk",
+        help="DIAGNOSTIC: keep top-K mask-plausible connected components (overrides thresholds); "
+        "requires cc strategy mask_components.",
+    ),
+    stop_after_selection: bool = typer.Option(
+        False,
+        "--stop-after-selection",
+        help="Exit after mask→3D selection (+ bbox/shell/CC + completion) and write debug artifacts. "
+        "Skips kinematic wobble / PhysGaussian MPM.",
     ),
     clean_debug_dir: bool = typer.Option(
         True,
@@ -368,15 +429,69 @@ def mode_b(
         f"physics_type={material_name}  "
         f"out={mode_b_out}"
     )
+    def _resolve_base_scene(*, use_smoke_ckpt: bool) -> tuple[Path, int]:
+        """
+        Resolve base scene output dir + 3DGS iteration.
+
+        Rules (main repo only, no submodule edits):
+        - If config provides `scene.model_output_full/smoke`, select by `use_smoke_ckpt`.
+        - Otherwise fall back to legacy `scene.model_output`.
+        - Iteration is chosen to match the selected base output:
+          - smoke output → `training_iterations_low`
+          - full output  → `training_iterations`
+        """
+        # Pick output dir.
+        out_rel: str
+        if use_smoke_ckpt:
+            out_rel = str(cfg.scene.model_output_smoke or cfg.scene.model_output)
+        else:
+            out_rel = str(cfg.scene.model_output_full or cfg.scene.model_output)
+        model_out = cfg.resolve(out_rel)
+
+        # Pick iteration (match the chosen output dir).
+        smoke_out = cfg.scene.model_output_smoke
+        is_smoke_out = bool(smoke_out) and Path(out_rel).as_posix() == Path(str(smoke_out)).as_posix()
+        iters = int(cfg.scene.training_iterations_low if (use_smoke_ckpt or is_smoke_out) else cfg.scene.training_iterations)
+        return model_out, iters
+
+    def _list_existing_iterations(scene_out: Path) -> list[int]:
+        pc_dir = scene_out / "point_cloud"
+        if not pc_dir.is_dir():
+            return []
+        out: list[int] = []
+        for p in pc_dir.iterdir():
+            if not p.is_dir():
+                continue
+            name = p.name
+            if not name.startswith("iteration_"):
+                continue
+            try:
+                out.append(int(name.split("_", 1)[1]))
+            except Exception:
+                continue
+        return sorted(set(out))
+
     colmap_scene = cfg.resolve(cfg.scene.data_root) / cfg.scene.scene_name
-    model_out = cfg.resolve(cfg.scene.model_output)
-    use_smoke_3dgs_checkpoint = smoke or smoke_3dgs
-    iters = (
-        cfg.scene.training_iterations_low if use_smoke_3dgs_checkpoint else cfg.scene.training_iterations
-    )
+    preset_smoke = bool(getattr(mode_b_preset, "use_smoke_3dgs", False))
+    # CLI flags override preset defaults.
+    use_smoke_3dgs_checkpoint = bool(smoke or smoke_3dgs or (preset_smoke and not (smoke or smoke_3dgs)))
+    model_out, iters = _resolve_base_scene(use_smoke_ckpt=use_smoke_3dgs_checkpoint)
     ply_path = model_out / "point_cloud" / f"iteration_{iters}" / "point_cloud.ply"
+    console.print(
+        f"[mode-b] base_scene={model_out}  iters={iters}  ply={ply_path}  "
+        f"(smoke_flag={bool(smoke or smoke_3dgs)} preset_smoke={preset_smoke})"
+    )
     if not ply_path.is_file():
-        raise typer.BadParameter(f"Missing {ply_path}; run train first")
+        found = _list_existing_iterations(model_out)
+        raise typer.BadParameter(
+            "Missing base-scene checkpoint.\n"
+            f" - preset: {preset or 'none'}\n"
+            f" - base scene: {model_out}\n"
+            f" - expected iteration: {iters}\n"
+            f" - missing path: {ply_path}\n"
+            f" - found iterations: {found if found else '[] (no point_cloud/iteration_*/ found)'}\n"
+            "Fix by training the base scene (train / train --smoke) or updating scene.model_output_full/smoke + iterations."
+        )
     if debug_mask_to_gaussians_only:
         from segmentation.mask_projection_debug_run import run_mask_projection_debug
 
@@ -425,6 +540,9 @@ def mode_b(
     idx_surface: np.ndarray | None = None
     idx_nearest_consensus: np.ndarray | None = None
     reused_surface_cache: Path | None = None
+    # Cache for selection completion: training_camera_index -> (mask, depth, K, w2c).
+    # Populated when we run Grounded-SAM2; can be lazily populated later for a single camera.
+    mask_view_cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
     if reuse_selection:
         # IMPORTANT: per-preset selection must not reuse the legacy global cache
         # (it usually contains the desk selection). Only reuse that cache for the
@@ -546,6 +664,12 @@ def mode_b(
 
                 mask = binary_erosion(mask, iterations=int(seg.mask_erode_iters))
             depth = np.load(render_dir / f"depth_{stem}.npy")
+            # Persist for completion pass (use training cam index = local_idx * stride).
+            try:
+                cam_train_idx = int(stem) * int(vs)
+            except Exception:
+                cam_train_idx = 0
+            mask_view_cache[int(cam_train_idx)] = (mask.astype(bool), depth.astype(np.float32), K, w2c)
             stats_n: dict[str, int | float] = {}
             stats_d: dict[str, int | float] = {}
             idx_n = mask_to_gaussian_indices(
@@ -699,20 +823,121 @@ def mode_b(
             f"After shell: {len(idx_shell)} Gaussians  xyz min={lo_sh.tolist()} max={hi_sh.tolist()}"
         )
 
-        idx_cc = largest_component_touching_seeds(
-            pos,
-            idx_shell,
-            idx_surface,
-            float(phys.mode_b_cc_link_radius_m),
-        )
+        if bool(cc_bypass):
+            idx_cc = idx_shell
+            console.print(f"[yellow]CC bypass enabled: using shell set ({len(idx_cc)} Gaussians).[/]")
+        else:
+            cc_strategy = str(getattr(phys, "mode_b_cc_keep_strategy", "single")).strip().lower()
+        if cc_strategy == "mask_components":
+            # Keep multiple components that genuinely overlap the target SAM mask in the render camera.
+            # This is robust when the object is fragmented (seat/backrest split) and the seed-touching
+            # "largest component" would drop the backrest.
+            # NOTE: the final render_camera_index is chosen later (visibility suite). For CC filtering
+            # we use a stable provisional training camera index: CLI --camera-index if provided,
+            # otherwise 0. If needed, lazily compute SAM2 mask for that view.
+            provisional_cam = int(camera_index) if camera_index is not None else 0
+            view = mask_view_cache.get(int(provisional_cam)) if "mask_view_cache" in locals() else None
+            if view is None:
+                try:
+                    render_dir = cfg.resolve("output/renders_views")
+                    seg = cfg.segmentation
+                    vs = int(cfg.reconstruction.render_view_stride)
+                    stem = f"{int(provisional_cam) // int(vs):05d}"
+                    rgb = render_dir / f"rgb_{stem}.png"
+                    meta_p = render_dir / f"cam_meta_{stem}.npz"
+                    depth_p = render_dir / f"depth_{stem}.npy"
+                    if rgb.exists() and meta_p.exists() and depth_p.exists():
+                        meta = np.load(meta_p)
+                        K = np.asarray(meta["K"], dtype=np.float64)
+                        w2c = np.asarray(meta["world_view_transform"], dtype=np.float64)
+                        depth = np.load(depth_p).astype(np.float32)
+                        mask_dbg = mode_b_out / "debug" / "masks"
+                        mask_dbg.mkdir(parents=True, exist_ok=True)
+                        mask_dbg_info: dict = {}
+                        mask = text_to_mask(
+                            str(rgb),
+                            text,
+                            seg.box_threshold,
+                            seg.text_threshold,
+                            gdino_config=seg.grounding_dino_config or None,
+                            gdino_checkpoint=seg.grounding_dino_checkpoint or None,
+                            sam2_config=seg.sam2_config or None,
+                            sam2_checkpoint=seg.sam2_checkpoint or None,
+                            device=seg.segmentation_device,
+                            allow_cpu_fallback=bool(getattr(seg, "allow_cpu_fallback", False)),
+                            debug_mask_dir=mask_dbg,
+                            debug_stem=f"{rgb.stem}_ccmask",
+                            debug_info=mask_dbg_info,
+                        )
+                        mask_view_cache[int(provisional_cam)] = (
+                            mask.astype(bool),
+                            depth,
+                            K,
+                            w2c,
+                        )
+                        view = mask_view_cache.get(int(provisional_cam))
+                        console.print(
+                            f"[mode-b] CC(mask_components): lazily computed mask for provisional_cam={provisional_cam} "
+                            f"(rgb={rgb.name})"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    console.print(f"[yellow][mode-b] CC(mask_components): lazy mask compute failed: {exc}[/]")
+            if view is None:
+                idx_cc = largest_component_touching_seeds(
+                    pos,
+                    idx_shell,
+                    idx_surface,
+                    float(phys.mode_b_cc_link_radius_m),
+                )
+                console.print(
+                    "[yellow]CC strategy=mask_components but no (mask,depth,K,w2c) cached yet; "
+                    "falling back to single-component CC.[/]"
+                )
+            else:
+                from physics.mode_b_selection import filter_components_by_mask_projection
+
+                mask_c, depth_c, K_c, w2c_c = view
+                idx_cc, cc_dbg = filter_components_by_mask_projection(
+                    positions=pos,
+                    candidate_indices=idx_shell,
+                    mask=mask_c,
+                    depth_map=depth_c,
+                    K=K_c,
+                    world_view_transform=w2c_c,
+                    link_radius_m=float(phys.mode_b_cc_link_radius_m),
+                    depth_tolerance_abs_m=float(seg.mask_depth_tolerance_abs_m),
+                    depth_tolerance_rel=float(seg.mask_depth_tolerance_rel),
+                    max_components=int(cc_keep_topk) if cc_keep_topk is not None else int(getattr(phys, "mode_b_cc_max_components", 4)),
+                    score_min=0.0 if cc_keep_topk is not None else float(getattr(phys, "mode_b_cc_mask_score_min", 0.02)),
+                    neighbor_radius_m=float(getattr(phys, "mode_b_selection_completion_neighbor_radius_m", 0.0))
+                    if getattr(phys, "mode_b_selection_completion_enabled", False)
+                    else None,
+                    seed_indices=idx_surface,
+                )
+                (mode_b_out / "debug").mkdir(parents=True, exist_ok=True)
+                (mode_b_out / "debug" / "cc_mask_components_debug.json").write_text(
+                    json.dumps(cc_dbg, indent=2),
+                    encoding="utf-8",
+                )
+                console.print(
+                    f"CC(mask_components): {len(idx_shell)} → {len(idx_cc)} "
+                    f"(wrote {mode_b_out / 'debug' / 'cc_mask_components_debug.json'})"
+                )
+        else:
+            idx_cc = largest_component_touching_seeds(
+                pos,
+                idx_shell,
+                idx_surface,
+                float(phys.mode_b_cc_link_radius_m),
+            )
+            console.print(
+                f"Connected-component (single, seeds, r={phys.mode_b_cc_link_radius_m:g} m): "
+                f"{len(idx_shell)} → {len(idx_cc)} Gaussians"
+            )
+
         if idx_cc.size == 0:
             console.print("[yellow]Connected-component filter removed all points; using shell set.[/]")
             idx_cc = idx_shell
-        else:
-            console.print(
-                f"Connected-component (seeds, r={phys.mode_b_cc_link_radius_m:g} m): "
-                f"{len(idx_shell)} → {len(idx_cc)} Gaussians"
-            )
         lo_cc, hi_cc = selection_xyz_bounds(pos, idx_cc)
         console.print(
             f"After CC: {len(idx_cc)} Gaussians  xyz min={lo_cc.tolist()} max={hi_cc.tolist()}"
@@ -749,6 +974,43 @@ def mode_b(
     best_cam_idx = 0
     dbg_info: dict | None = None
     selection_debug_used_cuda = False
+
+    # Always write compact selection stats (requested for rigorous tracing).
+    def _sel_stats(stage: str, indices: np.ndarray) -> dict:
+        ii = np.asarray(indices, dtype=np.int64).ravel()
+        ii = ii[(ii >= 0) & (ii < pos.shape[0])]
+        if ii.size == 0:
+            return {"stage": stage, "count": 0}
+        pts = pos[ii]
+        y = pts[:, 1].astype(np.float64)
+        qs = [0.0, 1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0, 100.0]
+        qv = np.percentile(y, qs).tolist()
+        hist_edges = np.linspace(float(np.min(y)), float(np.max(y)), num=11)
+        hist_counts, _ = np.histogram(y, bins=hist_edges)
+        lo, hi = pts.min(axis=0).astype(np.float64), pts.max(axis=0).astype(np.float64)
+        cen = pts.mean(axis=0).astype(np.float64)
+        return {
+            "stage": stage,
+            "count": int(ii.size),
+            "bbox_min_xyz": lo.tolist(),
+            "bbox_max_xyz": hi.tolist(),
+            "centroid_xyz": cen.tolist(),
+            "y_percentiles": {"q": qs, "v": qv},
+            "y_hist": {"edges": hist_edges.tolist(), "counts": hist_counts.astype(int).tolist()},
+        }
+
+    sel_trace = {
+        "surface": _sel_stats("surface", idx_surface if idx_surface is not None else np.asarray([], dtype=np.int64)),
+        "bbox": _sel_stats("bbox", idx_bbox if "idx_bbox" in locals() else idx),
+        "shell": _sel_stats("shell", idx_shell if "idx_shell" in locals() else idx),
+        "cc": _sel_stats("cc", idx_cc if "idx_cc" in locals() else idx),
+        "final": _sel_stats("final", idx),
+    }
+    (mode_b_out / "selection_trace.json").write_text(json.dumps(sel_trace, indent=2), encoding="utf-8")
+
+    # For debug overlays we need to distinguish pre- vs post-completion sets.
+    idx_pre_completion = np.asarray(idx, dtype=np.int64).copy()
+    added_by_completion = np.asarray([], dtype=np.int64)
     if debug_selection:
         dbg.mkdir(parents=True, exist_ok=True)
         if surface_indices_only:
@@ -858,6 +1120,354 @@ def mode_b(
         encoding="utf-8",
     )
     console.print(f"[mode-b] wrote camera audit [cyan]{mode_b_out / 'camera_usage.txt'}[/]")
+
+    # ---- Selection completion pass (fix: visible parts dominated by unselected gaussians) ----
+    # Uses chosen render_camera_index and the corresponding SAM mask view (if present).
+    if bool(phys.mode_b_selection_completion_enabled):
+        view = mask_view_cache.get(int(render_camera_index))
+        if view is None:
+            # If we reused cached surface indices, we may not have run SAM2 in this invocation.
+            # Lazily run SAM2 for a few rendered views (multi-view), using the already-rendered views folder.
+            try:
+                render_dir = cfg.resolve("output/renders_views")
+                seg = cfg.segmentation
+                vs = int(cfg.reconstruction.render_view_stride)
+                all_rgbs = sorted(render_dir.glob("rgb_*.png"))
+                rgbs = all_rgbs[: int(seg.multi_view_count)]
+                if not rgbs:
+                    raise FileNotFoundError(f"no rgb_*.png under {render_dir}")
+                mask_dbg = mode_b_out / "debug" / "masks"
+                mask_dbg.mkdir(parents=True, exist_ok=True)
+                for rgb in rgbs:
+                    stem = rgb.stem.replace("rgb_", "")
+                    meta = np.load(render_dir / f"cam_meta_{stem}.npz")
+                    K = np.asarray(meta["K"], dtype=np.float64)
+                    w2c = np.asarray(meta["world_view_transform"], dtype=np.float64)
+                    mask_dbg_info: dict = {}
+                    mask = text_to_mask(
+                        str(rgb),
+                        text,
+                        seg.box_threshold,
+                        seg.text_threshold,
+                        gdino_config=seg.grounding_dino_config or None,
+                        gdino_checkpoint=seg.grounding_dino_checkpoint or None,
+                        sam2_config=seg.sam2_config or None,
+                        sam2_checkpoint=seg.sam2_checkpoint or None,
+                        device=seg.segmentation_device,
+                        allow_cpu_fallback=bool(getattr(seg, "allow_cpu_fallback", False)),
+                        debug_mask_dir=mask_dbg,
+                        debug_stem=f"{rgb.stem}_completion",
+                        debug_info=mask_dbg_info,
+                    )
+                    depth = np.load(render_dir / f"depth_{stem}.npy")
+                    cam_train_idx = int(stem) * int(vs)
+                    mask_view_cache[int(cam_train_idx)] = (
+                        mask.astype(bool),
+                        depth.astype(np.float32),
+                        K,
+                        w2c,
+                    )
+                view = mask_view_cache.get(int(render_camera_index))
+                console.print(
+                    f"[mode-b] selection completion: lazily computed SAM2 masks for {len(rgbs)} views; "
+                    f"camera={render_camera_index} has_mask={view is not None}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                view = None
+                console.print(
+                    f"[yellow][mode-b] selection completion enabled but failed to compute mask lazily: {exc}[/]"
+                )
+
+        if view is None:
+            console.print(
+                f"[yellow][mode-b] selection completion enabled but no mask/depth view for camera {render_camera_index}; "
+                "skipping.[/]"
+            )
+        else:
+            from segmentation.selection_completion import complete_selection_by_mask_projection
+
+            mask_c, depth_c, K_c, w2c_c = view
+            idx_before = np.asarray(idx, dtype=np.int64)
+            lo_b, hi_b = selection_xyz_bounds(pos, idx_before)
+            idx2, added = complete_selection_by_mask_projection(
+                positions=pos,
+                selected_indices=idx_before,
+                mask=mask_c,
+                depth_map=depth_c,
+                K=K_c,
+                world_view_transform=w2c_c,
+                selected_aabb_lo=lo_b,
+                selected_aabb_hi=hi_b,
+                aabb_expand_ratio=float(phys.mode_b_selection_completion_aabb_expand_ratio),
+                mask_dilate_px=int(getattr(phys, "mode_b_selection_completion_mask_dilate_px", 0)),
+                neighbor_radius_m=float(getattr(phys, "mode_b_selection_completion_neighbor_radius_m", 0.0)),
+                depth_tolerance_abs_m=float(seg.mask_depth_tolerance_abs_m),
+                depth_tolerance_rel=float(seg.mask_depth_tolerance_rel),
+                max_add=int(phys.mode_b_selection_completion_max_add),
+            )
+            if added.size:
+                idx = idx2
+                added_by_completion = np.asarray(added, dtype=np.int64)
+                np.save(sim_indices_path, idx)
+                np.save(selected_indices_path, idx)
+                console.print(
+                    f"[mode-b] selection completion: original={len(idx_before)}  "
+                    f"expanded={len(idx)}  added={len(added)}  "
+                    f"camera={render_camera_index} aabb_expand={phys.mode_b_selection_completion_aabb_expand_ratio}"
+                )
+                if debug_selection:
+                    dbg.mkdir(parents=True, exist_ok=True)
+                    save_subset_points_ply(pos, added, dbg / "selection_completion_added_only.ply", rgb=(0.1, 0.95, 0.1))
+                    save_subset_points_ply(pos, idx, dbg / "selection_completion_expanded_selected.ply", rgb=(1.0, 0.2, 0.05))
+                    import json as _json
+
+                    (dbg / "selection_completion_stats.json").write_text(
+                        _json.dumps(
+                            {
+                                "camera_index": int(render_camera_index),
+                                "original_selected_n": int(len(idx_before)),
+                                "expanded_selected_n": int(len(idx)),
+                                "added_n": int(len(added)),
+                                "aabb_expand_ratio": float(phys.mode_b_selection_completion_aabb_expand_ratio),
+                                "max_add": int(phys.mode_b_selection_completion_max_add),
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+            else:
+                console.print("[mode-b] selection completion: no additional gaussians added.")
+
+    # ---- Post-completion prune (remove background/window contamination) ----
+    if bool(getattr(phys, "mode_b_selection_prune_enabled", False)):
+        view = mask_view_cache.get(int(render_camera_index))
+        if view is None:
+            console.print("[yellow][mode-b] prune enabled but no cached mask/depth view; skipping prune.[/]")
+        else:
+            from segmentation.mask_to_gaussians import project_world_to_pixels
+
+            mask_c, depth_c, K_c, w2c_c = view
+            idx_before_prune = np.asarray(idx, dtype=np.int64)
+            prune_diag: dict[str, int | float] = {
+                "before_prune": int(len(idx_before_prune)),
+                "rejected_by_neighbor_distance": 0,
+                "rejected_by_mask": 0,
+                "rejected_by_upper_v_gate": 0,
+                "rejected_by_depth_seed_local": 0,
+                "retained_final": 0,
+            }
+            # Neighbor gate around surface seeds (tightens to chair volume)
+            r3 = float(getattr(phys, "mode_b_selection_prune_neighbor_radius_m", 0.0))
+            idx_prune = idx_before_prune
+            if r3 > 0.0 and idx_surface is not None and idx_surface.size:
+                try:
+                    from scipy.spatial import cKDTree
+
+                    tree = cKDTree(pos[np.asarray(idx_surface, dtype=np.int64)])
+                    d, _ = tree.query(pos[idx_prune], k=1, workers=-1)
+                    keep_nb = np.asarray(d <= r3)
+                    prune_diag["rejected_by_neighbor_distance"] = int((~keep_nb).sum())
+                    idx_prune = idx_prune[keep_nb]
+                except Exception:
+                    pass
+
+            # Strict mask check (no dilation): retained candidates must land inside the chair mask.
+            mask_gate = np.asarray(mask_c, dtype=bool)
+            r = int(getattr(phys, "mode_b_selection_prune_mask_dilate_px", 0))
+
+            depth_obj = np.asarray(depth_c, dtype=np.float64).copy()
+            depth_obj[~np.asarray(mask_c, dtype=bool)] = np.inf
+            depth_ref = depth_obj
+            if r > 0:
+                try:
+                    from scipy.ndimage import minimum_filter
+
+                    depth_ref = minimum_filter(depth_obj, size=(2 * r + 1, 2 * r + 1), mode="nearest")
+                except Exception:
+                    depth_ref = depth_obj
+
+            Xw = pos[idx_prune]
+            u, v, z = project_world_to_pixels(
+                np.asarray(K_c, dtype=np.float64),
+                np.asarray(w2c_c, dtype=np.float64),
+                Xw,
+            )
+            H, Wm = mask_gate.shape
+            valid = z > 1e-6
+            ui = np.floor(u + 0.5).astype(np.int32)
+            vi = np.floor(v + 0.5).astype(np.int32)
+            inb = valid & (ui >= 0) & (ui < Wm) & (vi >= 0) & (vi < H)
+
+            keep = np.zeros_like(inb, dtype=bool)
+            if np.any(inb):
+                # Strict mask check
+                inside = np.zeros_like(inb, dtype=bool)
+                inside[inb] = mask_gate[vi[inb], ui[inb]]
+                prune_diag["rejected_by_mask"] = int(np.sum(inb & (~inside)))
+                sel = np.where(inside)[0]
+
+                # Seed-local depth gate:
+                # build a per-pixel depth map from projected SURFACE SEEDS (min depth in a local window).
+                seed_depth = np.full((H, Wm), np.inf, dtype=np.float64)
+                seed_v_min = None
+                try:
+                    if idx_surface is not None and idx_surface.size:
+                        Xs = pos[np.asarray(idx_surface, dtype=np.int64)]
+                        us, vs, zs = project_world_to_pixels(
+                            np.asarray(K_c, dtype=np.float64),
+                            np.asarray(w2c_c, dtype=np.float64),
+                            Xs,
+                        )
+                        val_s = zs > 1e-6
+                        uis = np.floor(us[val_s] + 0.5).astype(np.int32)
+                        vis = np.floor(vs[val_s] + 0.5).astype(np.int32)
+                        zss = zs[val_s].astype(np.float64)
+                        if vis.size:
+                            seed_v_min = float(np.percentile(vis.astype(np.float64), 1.0))
+                        for uu, vv, zz in zip(uis.tolist(), vis.tolist(), zss.tolist()):
+                            if 0 <= uu < Wm and 0 <= vv < H:
+                                if zz < seed_depth[vv, uu]:
+                                    seed_depth[vv, uu] = zz
+                        # local neighborhood min to allow "nearby seed depth"
+                        from scipy.ndimage import minimum_filter
+
+                        seed_depth = minimum_filter(seed_depth, size=7, mode="nearest")
+                except Exception:
+                    pass
+
+                if sel.size:
+                    abs_raw = getattr(phys, "mode_b_selection_prune_depth_abs_m", None)
+                    rel_raw = getattr(phys, "mode_b_selection_prune_depth_rel", None)
+                    abs_m = float(seg.mask_depth_tolerance_abs_m if abs_raw is None else abs_raw)
+                    rel = float(seg.mask_depth_tolerance_rel if rel_raw is None else rel_raw)
+
+                    # Reference depth: take the MIN of (mask-anchored rendered depth) and (seed-local depth).
+                    zr_mask = depth_ref[vi[sel], ui[sel]].astype(np.float64)
+                    zr_seed = seed_depth[vi[sel], ui[sel]].astype(np.float64)
+                    zr = np.minimum(zr_mask, zr_seed)
+                    # Upper-v gate: reject pixels far above the surface-seed vertical extent.
+                    if seed_v_min is not None:
+                        margin_px = 8.0
+                        ok_v = vi[sel].astype(np.float64) >= (float(seed_v_min) - margin_px)
+                        rejected_v = int(np.sum(~ok_v))
+                        prune_diag["rejected_by_upper_v_gate"] = rejected_v
+                        sel = sel[ok_v]
+                        zr = zr[ok_v]
+                    okz = np.isfinite(zr) & (zr > 0.0)
+                    sel2 = sel[okz]
+                    if sel2.size:
+                        zr2 = zr[okz]
+                        z2 = z[sel2]
+                        tol = np.maximum(abs_m, rel * zr2)
+                        # Reject behind-chair points relative to LOCAL seed depth
+                        depth_ok = z2 <= (zr2 + tol)
+                        keep_idx = sel2[depth_ok]
+                        keep[keep_idx] = True
+                        prune_diag["rejected_by_depth_seed_local"] = int(sel2.size - keep_idx.size)
+
+            idx_after_prune = np.sort(np.unique(idx_prune[keep].astype(np.int64)))
+            removed = np.setdiff1d(idx_before_prune, idx_after_prune, assume_unique=False).astype(np.int64)
+            idx = idx_after_prune
+            np.save(sim_indices_path, idx)
+            np.save(selected_indices_path, idx)
+            dbg.mkdir(parents=True, exist_ok=True)
+            np.save(dbg / "pruned_removed_global_indices.npy", removed)
+            prune_diag["retained_final"] = int(len(idx))
+            (dbg / "prune_rejection_reasons.json").write_text(json.dumps(prune_diag, indent=2), encoding="utf-8")
+            console.print(
+                f"[mode-b] prune: before={len(idx_before_prune)} after={len(idx)} removed={len(removed)} "
+                f"(neighbor_r={r3} dilate_px={r})"
+            )
+            # Cam0 overlays for prune results (exact sets).
+            try:
+                render_dir = cfg.resolve("output/renders_views")
+                rgb0 = render_dir / "rgb_00000.png"
+                meta0 = render_dir / "cam_meta_00000.npz"
+                if rgb0.is_file() and meta0.is_file():
+                    meta = np.load(meta0)
+                    K0 = np.asarray(meta["K"], dtype=np.float64)
+                    w2c0 = np.asarray(meta["world_view_transform"], dtype=np.float64)
+                    save_gaussian_projection_debug_image(
+                        rgb0,
+                        dbg / "cam0_overlay_post_prune_final_set_orange.png",
+                        pos,
+                        np.asarray(idx, dtype=np.int64),
+                        K0,
+                        w2c0,
+                        color_bgr=(0, 165, 255),  # orange
+                        radius=2,
+                    )
+                    if removed.size:
+                        save_gaussian_projection_debug_image(
+                            rgb0,
+                            dbg / "cam0_overlay_pruned_removed_magenta.png",
+                            pos,
+                            np.asarray(removed, dtype=np.int64),
+                            K0,
+                            w2c0,
+                            color_bgr=(255, 0, 255),  # magenta
+                            radius=2,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"[yellow][mode-b] prune cam0 overlays skipped: {exc}[/]")
+
+    # ---- Cam0 projection overlays for actual sets used by PhysGaussian/MPM ----
+    # Colors (BGR):
+    # - pre-completion sim set: red
+    # - added-by-completion: magenta
+    # - post-completion full set: orange
+    try:
+        render_dir = cfg.resolve("output/renders_views")
+        stem0 = "00000"
+        rgb0 = render_dir / f"rgb_{stem0}.png"
+        meta0 = render_dir / f"cam_meta_{stem0}.npz"
+        if rgb0.is_file() and meta0.is_file():
+            meta = np.load(meta0)
+            K0 = np.asarray(meta["K"], dtype=np.float64)
+            w2c0 = np.asarray(meta["world_view_transform"], dtype=np.float64)
+            dbg_proj = mode_b_out / "debug"
+            dbg_proj.mkdir(parents=True, exist_ok=True)
+
+            save_gaussian_projection_debug_image(
+                rgb0,
+                dbg_proj / "cam0_overlay_pre_completion_sim_set_red.png",
+                pos,
+                np.asarray(idx_pre_completion, dtype=np.int64),
+                K0,
+                w2c0,
+                color_bgr=(0, 0, 255),
+                radius=2,
+            )
+            if added_by_completion.size:
+                save_gaussian_projection_debug_image(
+                    rgb0,
+                    dbg_proj / "cam0_overlay_added_by_completion_magenta.png",
+                    pos,
+                    np.asarray(added_by_completion, dtype=np.int64),
+                    K0,
+                    w2c0,
+                    color_bgr=(255, 0, 255),
+                    radius=2,
+                )
+            save_gaussian_projection_debug_image(
+                rgb0,
+                dbg_proj / "cam0_overlay_post_completion_full_set_orange.png",
+                pos,
+                np.asarray(idx, dtype=np.int64),
+                K0,
+                w2c0,
+                color_bgr=(0, 165, 255),  # orange
+                radius=2,
+            )
+    except Exception as exc:  # noqa: BLE001 — diagnostics only
+        console.print(f"[yellow][mode-b] cam0 completion-set overlays skipped: {exc}[/]")
+
+    if bool(stop_after_selection):
+        console.print(
+            f"[mode-b] stop-after-selection: wrote [cyan]{mode_b_out / 'selection_trace.json'}[/] "
+            f"(pre_completion={len(idx_pre_completion)} post_completion={len(idx)} added={len(added_by_completion)})"
+        )
+        return
 
     preview_png = mode_b_out / "render_camera_rgb.png"
     if not preview_png.is_file():
@@ -1018,6 +1628,42 @@ def mode_b(
             else None
         ),
         mode_b_render_freeze_gaussian_cov=bool(phys.mode_b_render_freeze_gaussian_cov),
+        mode_b_render_cov_override=str(getattr(phys, "mode_b_render_cov_override", "none")),
+        mode_b_render_cov_override_scope=str(getattr(phys, "mode_b_render_cov_override_scope", "selected")),
+        mode_b_render_tiny_splats_var=float(getattr(phys, "mode_b_render_tiny_splats_var", 1.0e-6)),
+        mode_b_render_cov_diag_min=float(getattr(phys, "mode_b_render_cov_diag_min", 1.0e-6)),
+        mode_b_render_cov_diag_max=float(getattr(phys, "mode_b_render_cov_diag_max", 5.0e-3)),
+        mode_b_disp_propagation_enabled=bool(getattr(phys, "mode_b_disp_propagation_enabled", False)),
+        mode_b_disp_propagation_k=int(getattr(phys, "mode_b_disp_propagation_k", 8)),
+        mode_b_disp_low_percentile=float(getattr(phys, "mode_b_disp_low_percentile", 10.0)),
+        mode_b_disp_min_neighbor_moved_m=float(getattr(phys, "mode_b_disp_min_neighbor_moved_m", 0.05)),
+        mode_b_disp_propagation_alpha=float(getattr(phys, "mode_b_disp_propagation_alpha", 1.0)),
+        mode_b_save_selected_means3d_per_frame=bool(getattr(phys, "mode_b_save_selected_means3d_per_frame", False)),
+        mode_b_debug_dump_selected_only_renders=bool(getattr(phys, "mode_b_debug_dump_selected_only_renders", False)),
+        mode_b_extra_render_dump_variants=str(getattr(phys, "mode_b_extra_render_dump_variants", "all")),
+        mode_b_sand_render_override=bool(phys.mode_b_sand_render_override)
+        if material_name == "sand"
+        else False,
+        mode_b_sand_opacity_scale=float(phys.mode_b_sand_opacity_scale),
+        mode_b_sand_opacity_min=float(phys.mode_b_sand_opacity_min),
+        mode_b_sand_opacity_max=float(phys.mode_b_sand_opacity_max),
+        mode_b_sand_cov_scale=float(phys.mode_b_sand_cov_scale),
+        mode_b_sand_color_override_rgb=phys.mode_b_sand_color_override_rgb,
+        mode_b_sand_motion_correction=bool(phys.mode_b_sand_motion_correction)
+        if material_name == "sand"
+        else False,
+        mode_b_sand_motion_alpha=float(phys.mode_b_sand_motion_alpha),
+        mode_b_sand_global_dy_percentile=float(phys.mode_b_sand_global_dy_percentile),
+        mode_b_sand_min_dy_as_global_frac=(
+            float(phys.mode_b_sand_min_dy_as_global_frac)
+            if phys.mode_b_sand_min_dy_as_global_frac is not None
+            else None
+        ),
+        mode_b_sand_extreme_all_selected_down=bool(phys.mode_b_sand_extreme_all_selected_down)
+        if material_name == "sand"
+        else False,
+        mode_b_sand_extreme_total_down_m=float(phys.mode_b_sand_extreme_total_down_m),
+        mode_b_render_gaussian_subset=str(phys.mode_b_render_gaussian_subset),
         mode_b_mpm_kabsch_rigid_strip=bool(phys.mode_b_mpm_kabsch_rigid_strip),
         mode_b_mpm_kabsch_elastic_amp=float(phys.mode_b_mpm_kabsch_elastic_amp),
         mode_b_mpm_anchor_feet_y_percentile=(
@@ -1084,13 +1730,379 @@ def mode_b(
         playback_seconds=phys.compile_video_playback_sec,
         taichi_device_memory_gb=_taichi_gb,
     )
+    # Post-sim diagnostics: project moved/unmoved selected Gaussians onto cam0.
+    # moved_selected_local_indices.npy contains indices local to the *post-completion* selected set `idx`.
+    if not bool(getattr(phys, "mode_b_minimal_output", False)):
+        try:
+            dbg_proj = mode_b_out / "debug"
+            moved_local_p = dbg_proj / "moved_selected_local_indices.npy"
+            means0_p = dbg_proj / "selected_means3d_first.npy"
+            meansT_p = dbg_proj / "selected_means3d_last.npy"
+            if moved_local_p.is_file():
+                moved_local = np.load(moved_local_p).astype(np.int64).ravel()
+                sel_global = np.asarray(idx, dtype=np.int64).ravel()
+                moved_local = moved_local[(moved_local >= 0) & (moved_local < sel_global.shape[0])]
+                moved_global = np.unique(sel_global[moved_local]).astype(np.int64)
+                moved_mask = np.zeros(sel_global.shape[0], dtype=bool)
+                moved_mask[moved_local] = True
+                unmoved_global = np.unique(sel_global[~moved_mask]).astype(np.int64)
+
+                render_dir = cfg.resolve("output/renders_views")
+                stem0 = "00000"
+                rgb0 = render_dir / f"rgb_{stem0}.png"
+                meta0 = render_dir / f"cam_meta_{stem0}.npz"
+                if rgb0.is_file() and meta0.is_file():
+                    meta = np.load(meta0)
+                    K0 = np.asarray(meta["K"], dtype=np.float64)
+                    w2c0 = np.asarray(meta["world_view_transform"], dtype=np.float64)
+                    save_gaussian_projection_debug_image(
+                        rgb0,
+                        dbg_proj / "cam0_overlay_moved_selected_green.png",
+                        pos,
+                        moved_global,
+                        K0,
+                        w2c0,
+                        color_bgr=(0, 255, 0),
+                        radius=2,
+                    )
+                    save_gaussian_projection_debug_image(
+                        rgb0,
+                        dbg_proj / "cam0_overlay_unmoved_selected_blue.png",
+                        pos,
+                        unmoved_global,
+                        K0,
+                        w2c0,
+                        color_bgr=(255, 0, 0),
+                        radius=2,
+                    )
+
+                    # Displacement magnitude heatmap overlays (selected set only).
+                    if means0_p.is_file() and meansT_p.is_file():
+                        import cv2
+                        from segmentation.mask_to_gaussians import project_world_to_pixels
+
+                        X0 = np.load(means0_p).astype(np.float64)  # (Nsel,3)
+                        XT = np.load(meansT_p).astype(np.float64)  # (Nsel,3)
+                        nsel = int(min(sel_global.shape[0], X0.shape[0], XT.shape[0]))
+                        X0 = X0[:nsel]
+                        XT = XT[:nsel]
+                        disp = np.linalg.norm(XT - X0, axis=1)  # meters
+
+                        qs = [0.0, 1.0, 5.0, 25.0, 50.0, 75.0, 95.0, 99.0, 100.0]
+                        qv = np.percentile(disp, qs).tolist() if disp.size else []
+                        hist_edges = np.linspace(
+                            float(np.min(disp)) if disp.size else 0.0,
+                            float(np.max(disp)) if disp.size else 1.0,
+                            num=31,
+                        )
+                        hist_counts, _ = (
+                            np.histogram(disp, bins=hist_edges)
+                            if disp.size
+                            else (np.zeros(30, dtype=int), hist_edges)
+                        )
+                        (dbg_proj / "displacement_magnitude_summary.json").write_text(
+                            json.dumps(
+                                {
+                                    "selected_n": int(nsel),
+                                    "moved_n_threshold_1e-4": int(moved_local.size),
+                                    "unmoved_n_threshold_1e-4": int(nsel - moved_local.size),
+                                    "threshold_m": 1e-4,
+                                    "disp_percentiles_m": {"q": qs, "v": qv},
+                                    "disp_hist_m": {
+                                        "edges": hist_edges.tolist(),
+                                        "counts": hist_counts.astype(int).tolist(),
+                                    },
+                                },
+                                indent=2,
+                            ),
+                            encoding="utf-8",
+                        )
+
+                        def _draw_heatmap(base_bgr, proj_xyz: np.ndarray, out_name: str) -> None:
+                            if base_bgr is None or disp.size == 0:
+                                return
+                            H, W = base_bgr.shape[:2]
+                            u, v, z = project_world_to_pixels(K0, w2c0, proj_xyz)
+                            valid = z > 1e-6
+                            ui = np.floor(u[valid] + 0.5).astype(np.int32)
+                            vi = np.floor(v[valid] + 0.5).astype(np.int32)
+                            disp_v = disp[valid]
+                            if disp_v.size == 0:
+                                return
+                            cap = float(np.percentile(disp_v, 99.0))
+                            cap = max(cap, 1e-6)
+                            t = np.clip(disp_v / cap, 0.0, 1.0)
+                            vals = (t * 255.0).astype(np.uint8)
+                            colors = cv2.applyColorMap(vals.reshape(-1, 1), cv2.COLORMAP_TURBO).reshape(-1, 3)
+                            for (uu, vv, col) in zip(ui.tolist(), vi.tolist(), colors.tolist()):
+                                if 0 <= uu < W and 0 <= vv < H:
+                                    cv2.circle(base_bgr, (uu, vv), 2, tuple(int(c) for c in col), thickness=-1)
+                            cv2.imwrite(str(dbg_proj / out_name), base_bgr)
+
+                        base_final = cv2.imread(str(rgb0))
+                        if base_final is not None:
+                            _draw_heatmap(
+                                base_final,
+                                XT,
+                                "cam0_overlay_displacement_magnitude_heatmap_projected_at_final_turbo.png",
+                            )
+                            base_init = cv2.imread(str(rgb0))
+                            _draw_heatmap(
+                                base_init,
+                                X0,
+                                "cam0_overlay_displacement_magnitude_on_initial_positions_turbo.png",
+                            )
+        except Exception as exc:  # noqa: BLE001 — diagnostics only
+            console.print(f"[yellow][mode-b] moved/unmoved cam0 overlays skipped: {exc}[/]")
     dbg_js = mode_b_out / "frames" / "mode_b_mpm_debug.json"
-    if dbg_js.is_file():
+    if dbg_js.is_file() and not bool(getattr(phys, "mode_b_minimal_output", False)):
         console.print(f"[mode-b] MPM COM / drift log: [cyan]{dbg_js}[/]")
     tilt_js = mode_b_out / "frames" / "mode_b_mpm_tilt_series.json"
-    if tilt_js.is_file():
+    if tilt_js.is_file() and not bool(getattr(phys, "mode_b_minimal_output", False)):
         console.print(f"[mode-b] MPM tilt time-series + drift summary: [cyan]{tilt_js}[/]")
     console.print(f"Video: [green]{vid}[/]")
+
+    # Background compositing (fills black holes behind collapsed chair).
+    try:
+        if bool(getattr(phys, "mode_b_background_composite_enabled", False)):
+            from rendering.background_composite import (
+                compile_video_ffmpeg,
+                composite_frames_over_plate,
+                composite_frames_over_plate_objectmask,
+                composite_frames_over_plate_objectmask_hard,
+                composite_selected_only_matte_over_plate,
+                fullframe_plate_cleanup_encode_mp4,
+                make_inpainted_plate,
+            )
+
+            dbg = mode_b_out / "debug"
+            dbg.mkdir(parents=True, exist_ok=True)
+            render_dir = cfg.resolve("output/renders_views")
+            cam0_rgb = render_dir / "rgb_00000.png"
+            # Prefer cached SAM mask from CC/completion stage if present.
+            default_mask = dbg / "masks" / "rgb_00000_ccmask_mask_binary.png"
+            mask_path = Path(getattr(phys, "mode_b_background_mask_path", "")).expanduser() if getattr(phys, "mode_b_background_mask_path", None) else default_mask
+            if not mask_path.is_file():
+                # Fallback: build a mask by projecting selected centers at t=0.
+                # This makes bg compositing usable even when debug_selection is disabled.
+                try:
+                    import numpy as _np
+                    import cv2
+
+                    meta = _np.load(cfg.resolve("output/renders_views") / "cam_meta_00000.npz")
+                    K = _np.asarray(meta["K"], dtype=_np.float64)
+                    W = _np.asarray(meta["world_view_transform"], dtype=_np.float64)
+                    sel0 = dbg / "selected_means3d_first.npy"
+                    if sel0.is_file():
+                        Xi = _np.load(sel0).astype(_np.float64)
+                        img = cv2.imread(str(cam0_rgb))
+                        if img is None:
+                            raise FileNotFoundError(cam0_rgb)
+                        mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
+                        from segmentation.mask_to_gaussians import project_world_to_pixels
+
+                        u, v, z = project_world_to_pixels(K, W, Xi)
+                        valid = z > 1e-6
+                        ui = _np.floor(u[valid] + 0.5).astype(_np.int32)
+                        vi = _np.floor(v[valid] + 0.5).astype(_np.int32)
+                        pr = int(getattr(phys, "mode_b_background_objectmask_point_radius_px", 2))
+                        for uu, vv in zip(ui.tolist(), vi.tolist()):
+                            if 0 <= uu < mask.shape[1] and 0 <= vv < mask.shape[0]:
+                                cv2.circle(mask, (uu, vv), max(1, pr), 255, thickness=-1)
+                        dpx = int(getattr(phys, "mode_b_background_objectmask_dilate_px", 6))
+                        if dpx > 0:
+                            yy, xx = _np.ogrid[-dpx : dpx + 1, -dpx : dpx + 1]
+                            kernel = ((xx * xx + yy * yy) <= (dpx * dpx)).astype(_np.uint8)
+                            mask = cv2.dilate(mask, kernel, iterations=1)
+                        mask_path.parent.mkdir(parents=True, exist_ok=True)
+                        mask_path = dbg / "masks" / "rgb_00000_auto_mask_from_selected_centers.png"
+                        cv2.imwrite(str(mask_path), mask)
+                except Exception:
+                    pass
+            plate = make_inpainted_plate(
+                cam0_rgb_path=cam0_rgb,
+                chair_mask_path=mask_path,
+                out_plate_path=dbg / "cam0_inpainted_background_plate.png",
+                inpaint_radius_px=int(getattr(phys, "mode_b_background_inpaint_radius_px", 5)),
+            )
+            frames_dir = mode_b_out / "frames"
+            fps = int(round(1.0 / float(phys.frame_dt)))
+            use_objmask = bool(getattr(phys, "mode_b_background_objectmask_composite", True))
+            if bool(getattr(phys, "mode_b_fullframe_plate_cleanup", False)):
+                out_mp4 = mode_b_out / "video" / "final_cleanup_fullframe.mp4"
+                n = fullframe_plate_cleanup_encode_mp4(
+                    frames_dir=frames_dir,
+                    plate_path=plate,
+                    original_chair_mask_path=mask_path,
+                    out_mp4=out_mp4,
+                    fps=fps,
+                    allowed_region_dilate_px=int(
+                        getattr(phys, "mode_b_background_allowed_region_dilate_px", 8)
+                    ),
+                    allowed_region_down_extend_px=int(
+                        getattr(phys, "mode_b_background_allowed_region_down_extend_px", 220)
+                    ),
+                    allowed_region_up_exclude_px=int(
+                        getattr(phys, "mode_b_background_allowed_region_up_exclude_px", 40)
+                    ),
+                    dark_thresh_u8=int(getattr(phys, "mode_b_fullframe_cleanup_dark_thresh_u8", 42)),
+                    protect_erode_px=int(getattr(phys, "mode_b_fullframe_cleanup_protect_erode_px", 5)),
+                    near_chair_dilate_px=int(
+                        getattr(phys, "mode_b_fullframe_cleanup_near_chair_dilate_px", 64)
+                    ),
+                    feather_px=int(getattr(phys, "mode_b_fullframe_cleanup_feather_px", 5)),
+                )
+                console.print(
+                    f"[mode-b] full-frame plate cleanup → [green]{out_mp4}[/] ({n} frames)"
+                )
+            elif bool(getattr(phys, "mode_b_background_selected_only_matte", False)):
+                fg_dir = dbg / "extra_renders" / "selected_only_normal"
+                mask_dir = dbg / "extra_renders" / "selected_only_normal_mask"
+                if not fg_dir.is_dir() or not any(fg_dir.glob("*.png")):
+                    raise FileNotFoundError(
+                        f"missing {fg_dir} PNGs; enable physics.mode_b_debug_dump_selected_only_renders "
+                        "and re-run PhysGaussian (selected-only normal pass)."
+                    )
+                if not mask_dir.is_dir() or not any(mask_dir.glob("*.png")):
+                    raise FileNotFoundError(
+                        f"missing {mask_dir} PNGs; enable physics.mode_b_debug_dump_selected_only_renders "
+                        "and re-run PhysGaussian."
+                    )
+                out_frames = mode_b_out / "frames_final_selected_only_plate"
+                n = composite_selected_only_matte_over_plate(
+                    plate_path=plate,
+                    chair_rgb_dir=fg_dir,
+                    raw_mask_dir=mask_dir,
+                    out_composite_dir=out_frames,
+                    out_alpha_dir=mode_b_out / "frames_alpha_matte",
+                    out_foreground_dir=mode_b_out / "frames_foreground_selected_only",
+                    original_chair_mask_path=mask_path,
+                    allowed_region_dilate_px=int(getattr(phys, "mode_b_background_allowed_region_dilate_px", 8)),
+                    allowed_region_down_extend_px=int(
+                        getattr(phys, "mode_b_background_allowed_region_down_extend_px", 220)
+                    ),
+                    allowed_region_up_exclude_px=int(
+                        getattr(phys, "mode_b_background_allowed_region_up_exclude_px", 40)
+                    ),
+                    alpha_close_kernel_px=int(getattr(phys, "mode_b_background_alpha_close_kernel_px", 25)),
+                    alpha_feather_blur_px=int(getattr(phys, "mode_b_background_alpha_feather_blur_px", 7)),
+                )
+                out_mp4 = mode_b_out / "video" / "final_chair_only_collapse.mp4"
+            elif bool(getattr(phys, "mode_b_background_hard_chair_only", False)):
+                # Hard chair-only compositing: only allow simulated pixels inside strict chair mask.
+                means_pf = dbg / "selected_means3d_per_frame.npy"
+                if not means_pf.is_file():
+                    raise FileNotFoundError(
+                        f"missing {means_pf} (enable physics.mode_b_save_selected_means3d_per_frame)"
+                    )
+                out_frames = mode_b_out / "frames_final_chair_only"
+                n = composite_frames_over_plate_objectmask_hard(
+                    frames_dir=frames_dir,
+                    plate_path=plate,
+                    out_frames_dir=out_frames,
+                    cam_meta_npz=cfg.resolve("output/renders_views") / "cam_meta_00000.npz",
+                    selected_means_per_frame_npy=means_pf,
+                    original_chair_mask_path=mask_path,
+                    point_radius_px=int(getattr(phys, "mode_b_background_objectmask_point_radius_px", 2)),
+                    dilate_px=int(getattr(phys, "mode_b_background_objectmask_dilate_px", 6)),
+                    blur_px=int(getattr(phys, "mode_b_background_objectmask_blur_px", 11)),
+                    allowed_region_dilate_px=int(getattr(phys, "mode_b_background_allowed_region_dilate_px", 8)),
+                    allowed_region_down_extend_px=int(getattr(phys, "mode_b_background_allowed_region_down_extend_px", 220)),
+                    allowed_region_up_exclude_px=int(getattr(phys, "mode_b_background_allowed_region_up_exclude_px", 40)),
+                )
+                out_mp4 = mode_b_out / "video" / "final_chair_only_collapse.mp4"
+            elif use_objmask:
+                means_pf = dbg / "selected_means3d_per_frame.npy"
+                if not means_pf.is_file():
+                    raise FileNotFoundError(
+                        f"missing {means_pf} (enable physics.mode_b_save_selected_means3d_per_frame)"
+                    )
+                out_frames = mode_b_out / "frames_composited_objmask"
+                n = composite_frames_over_plate_objectmask(
+                    frames_dir=frames_dir,
+                    plate_path=plate,
+                    out_frames_dir=out_frames,
+                    cam_meta_npz=cfg.resolve("output/renders_views") / "cam_meta_00000.npz",
+                    selected_means_per_frame_npy=means_pf,
+                    point_radius_px=int(getattr(phys, "mode_b_background_objectmask_point_radius_px", 2)),
+                    dilate_px=int(getattr(phys, "mode_b_background_objectmask_dilate_px", 6)),
+                    blur_px=int(getattr(phys, "mode_b_background_objectmask_blur_px", 11)),
+                    out_masks_dir=mode_b_out / "masks_objmask",
+                )
+                out_mp4 = mode_b_out / "video" / "output_bg_objmask_composited.mp4"
+            else:
+                out_frames = mode_b_out / "frames_composited_bg"
+                n = composite_frames_over_plate(
+                    frames_dir=frames_dir,
+                    plate_path=plate,
+                    out_frames_dir=out_frames,
+                    diff_threshold_u8=int(getattr(phys, "mode_b_background_diff_threshold_u8", 18)),
+                    dilate_px=int(getattr(phys, "mode_b_background_diff_dilate_px", 3)),
+                )
+                out_mp4 = mode_b_out / "video" / "output_bg_composited.mp4"
+            if not bool(getattr(phys, "mode_b_fullframe_plate_cleanup", False)):
+                compile_video_ffmpeg(frames_dir=out_frames, out_mp4=out_mp4, fps=fps)
+                console.print(f"[mode-b] bg composite wrote {n} frames + video [green]{out_mp4}[/]")
+
+            # Compile selected-only render dumps if present (skip matte / fullframe cleanup paths).
+            try:
+                if not bool(getattr(phys, "mode_b_background_selected_only_matte", False)) and not bool(
+                    getattr(phys, "mode_b_fullframe_plate_cleanup", False)
+                ):
+                    extra_root = dbg / "extra_renders"
+                    if extra_root.is_dir():
+                        for kind in ("selected_only_normal", "selected_only_clamp_diag", "selected_only_tiny_splats"):
+                            fr_dir = extra_root / kind
+                            if fr_dir.is_dir():
+                                mp4 = mode_b_out / "video" / f"{kind}.mp4"
+                                compile_video_ffmpeg(frames_dir=fr_dir, out_mp4=mp4, fps=fps)
+                        for kind in (
+                            "selected_only_normal_mask",
+                            "selected_only_clamp_diag_mask",
+                            "selected_only_tiny_splats_mask",
+                        ):
+                            fr_dir = extra_root / kind
+                            if fr_dir.is_dir():
+                                mp4 = mode_b_out / "video" / f"{kind}.mp4"
+                                compile_video_ffmpeg(frames_dir=fr_dir, out_mp4=mp4, fps=fps)
+                        means_pf = dbg / "selected_means3d_per_frame.npy"
+                        if means_pf.is_file():
+                            for kind in ("selected_only_normal", "selected_only_clamp_diag", "selected_only_tiny_splats"):
+                                fr_dir = extra_root / kind
+                                if fr_dir.is_dir():
+                                    out_fr = mode_b_out / f"frames_composited_{kind}"
+                                    n2 = composite_frames_over_plate_objectmask(
+                                        frames_dir=fr_dir,
+                                        plate_path=plate,
+                                        out_frames_dir=out_fr,
+                                        cam_meta_npz=cfg.resolve("output/renders_views") / "cam_meta_00000.npz",
+                                        selected_means_per_frame_npy=means_pf,
+                                        point_radius_px=int(
+                                            getattr(phys, "mode_b_background_objectmask_point_radius_px", 2)
+                                        ),
+                                        dilate_px=int(getattr(phys, "mode_b_background_objectmask_dilate_px", 6)),
+                                        blur_px=int(getattr(phys, "mode_b_background_objectmask_blur_px", 11)),
+                                        out_masks_dir=None,
+                                    )
+                                    mp4 = mode_b_out / "video" / f"{kind}_bg_objmask_composited.mp4"
+                                    compile_video_ffmpeg(frames_dir=out_fr, out_mp4=mp4, fps=fps)
+                                    console.print(f"[mode-b] composed {kind}: {n2} frames -> {mp4}")
+            except Exception as exc2:  # noqa: BLE001
+                console.print(f"[yellow][mode-b] extra render dump compile skipped: {exc2}[/]")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow][mode-b] bg composite skipped: {exc}[/]")
+
+    if bool(getattr(phys, "mode_b_minimal_output", False)):
+        try:
+            _mode_b_cleanup_minimal_artifacts(mode_b_out)
+            console.print(
+                f"[mode-b] minimal output: removed intermediates under [cyan]{mode_b_out}[/] "
+                "(kept phys_config.json, indices npy, video/output.mp4, final_chair_only_collapse.mp4, "
+                "final_cleanup_fullframe.mp4, frames_foreground_selected_only, frames_alpha_matte, "
+                "frames_final_selected_only_plate if present)."
+            )
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow][mode-b] minimal cleanup skipped: {exc}[/]")
 
 
 @app.command("mode-b-selection-debug")
@@ -1849,10 +2861,14 @@ def mode_a(
             f"→ placed [cyan]{placed_mesh_path.resolve()}[/]"
         )
 
+    sim_output_root = cfg.resolve(cfg.paths.sim_output)
+    sim_run = get_sim_run_dir(sim_output_root, "mode_a", material)
+    sim_run.mkdir(parents=True, exist_ok=True)
+    console.print(f"[mode-a] sim_run (isolated output): [cyan]{sim_run}[/]")
+
     if no_physics:
         console.print(f"Merged: [cyan]{merged}[/]  (--no-physics: skipped simulation)")
         if mesh_render and mesh_verts_w is not None and mesh_faces_np is not None:
-            sim_run = cfg.resolve(cfg.paths.sim_output) / "mode_a_run"
             (sim_run / "frames").mkdir(parents=True, exist_ok=True)
             rgb = composite_mesh_over_base_gs(
                 colmap_scene=colmap_scene,
@@ -1872,7 +2888,6 @@ def mode_a(
     frame_num_override = 1 if preview else cfg.physics.frame_num
     if preview:
         console.print("[yellow]preview mode:[/] ONE output frame (kinematic or MPM).")
-    sim_run = cfg.resolve(cfg.paths.sim_output) / "mode_a_run"
     track_debug = bool(wobble_debug and in_place_wobble)
     save_gauss_for_mesh = bool(mesh_render and in_place_wobble and not wobble_use_mpm)
 
@@ -1932,10 +2947,8 @@ def mode_a(
     # Simulate ONLY the generated object Gaussians (indices [n_base, n_base+n_obj)).
     # Simulating the full merged PLY applies physics to the background scene, which
     # destroys the render.
-    sim_cfg_dir = cfg.resolve(cfg.paths.sim_output)
-    sim_cfg_dir.mkdir(parents=True, exist_ok=True)
-    sim_cfg = sim_cfg_dir / "phys_mode_a.json"
-    sim_idx_path = sim_cfg_dir / "mode_a_obj_indices.npy"
+    sim_cfg = sim_run / "phys_mode_a.json"
+    sim_idx_path = sim_run / "mode_a_obj_indices.npy"
     gply = PlyData.read(str(merged))
     v = gply["vertex"]
     pos = np.stack([np.asarray(v["x"]), np.asarray(v["y"]), np.asarray(v["z"])], axis=1)

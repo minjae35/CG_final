@@ -123,6 +123,143 @@ def largest_component_touching_seeds(
     return np.sort(cand[mask].astype(np.int64))
 
 
+def filter_components_by_mask_projection(
+    *,
+    positions: np.ndarray,
+    candidate_indices: np.ndarray,
+    mask: np.ndarray,
+    depth_map: np.ndarray,
+    K: np.ndarray,
+    world_view_transform: np.ndarray,
+    link_radius_m: float,
+    depth_tolerance_abs_m: float,
+    depth_tolerance_rel: float,
+    max_components: int,
+    score_min: float,
+    min_good_points: int = 80,
+    min_component_size: int = 250,
+    neighbor_radius_m: float | None = None,
+    seed_indices: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict]:
+    """Keep multiple 3D components whose projected points overlap the SAM mask (with depth gate).
+
+    This is a conservative alternative to `largest_component_touching_seeds` for objects that
+    are fragmented into multiple components (e.g., seat and backrest split by sparse sampling).
+    """
+    cand = np.unique(np.asarray(candidate_indices, dtype=np.int64).ravel())
+    cand = cand[(cand >= 0) & (cand < positions.shape[0])]
+    if cand.size == 0:
+        return cand.astype(np.int64), {"kept_components": 0, "total_components": 0}
+
+    # Optional neighborhood gate: only evaluate candidates near seeds (helps reject walls).
+    if neighbor_radius_m is not None and seed_indices is not None and float(neighbor_radius_m) > 0.0:
+        seeds = np.unique(np.asarray(seed_indices, dtype=np.int64).ravel())
+        seeds = seeds[(seeds >= 0) & (seeds < positions.shape[0])]
+        if seeds.size > 0:
+            tree = cKDTree(positions[seeds])
+            d, _ = tree.query(positions[cand], k=1)
+            cand = cand[d <= float(neighbor_radius_m)]
+            if cand.size == 0:
+                return cand.astype(np.int64), {"kept_components": 0, "total_components": 0}
+
+    # Build connected components using the same link radius as mode-b CC.
+    P = positions[cand]
+    tree = cKDTree(P)
+    r = float(link_radius_m)
+    pairs = tree.query_pairs(r=r)
+    nloc = int(cand.shape[0])
+    parent = np.arange(nloc, dtype=np.int64)
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = int(parent[a])
+        return int(a)
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i, j in pairs:
+        union(int(i), int(j))
+
+    roots = np.array([find(i) for i in range(nloc)], dtype=np.int64)
+    uniq_roots, inv = np.unique(roots, return_inverse=True)
+
+    H, W = mask.shape[:2]
+    m = np.asarray(mask, dtype=bool)
+    depth = np.asarray(depth_map, dtype=np.float64)
+    # Anchor depth to object surface only: mask-only depth then min-filter in a small window.
+    # (Avoid dilated-mask pixels comparing against wall depth.)
+    try:
+        from scipy.ndimage import minimum_filter
+    except Exception:
+        minimum_filter = None
+    depth_obj = np.where(m & np.isfinite(depth) & (depth > 1e-6), depth, np.inf)
+    if minimum_filter is not None:
+        depth_ref = minimum_filter(depth_obj, size=5, mode="nearest")
+    else:
+        depth_ref = depth_obj
+
+    # IMPORTANT: match 3DGS CUDA convention (row-vector homogeneous): Xc_h = Xw_h @ W
+    from segmentation.mask_to_gaussians import project_world_to_pixels
+
+    u_all, v_all, z_all = project_world_to_pixels(K, world_view_transform, P)
+    in_front = z_all > 1e-6
+    ui = np.rint(u_all).astype(np.int64)
+    vi = np.rint(v_all).astype(np.int64)
+    in_bounds = (ui >= 0) & (ui < W) & (vi >= 0) & (vi < H) & in_front & np.isfinite(z_all)
+    inside_mask = np.zeros_like(in_bounds, dtype=bool)
+    z_ok = np.zeros_like(in_bounds, dtype=bool)
+    idxb = np.where(in_bounds)[0]
+    if idxb.size > 0:
+        inside_mask[idxb] = m[vi[idxb], ui[idxb]]
+        zr = depth_ref[vi[idxb], ui[idxb]]
+        tol = float(depth_tolerance_abs_m) + float(depth_tolerance_rel) * np.where(np.isfinite(zr), zr, 0.0)
+        # Directional: reject points behind the visible surface.
+        z_ok[idxb] = np.isfinite(zr) & (z_all[idxb] <= (zr + tol))
+
+    pass_gate = inside_mask & z_ok
+    # Score components by fraction of *all* points that pass the gate (robust when many points
+    # project out-of-frame). Also keep raw counts for debugging.
+    scores: list[tuple[int, float, int, int, int]] = []
+    for ci, root in enumerate(uniq_roots.tolist()):
+        loc = np.where(inv == ci)[0]
+        if loc.size == 0:
+            continue
+        if int(loc.size) < int(min_component_size):
+            continue
+        inb = int(np.sum(in_bounds[loc]))
+        good = int(np.sum(pass_gate[loc]))
+        score = float(good / max(1, int(loc.size)))
+        scores.append((int(root), score, good, inb, int(loc.size)))
+
+    scores.sort(key=lambda t: t[1], reverse=True)
+    kept_roots = [
+        r0
+        for (r0, sc, good, _inb, _sz) in scores
+        if (sc >= float(score_min) and int(good) >= int(min_good_points))
+    ][: int(max_components)]
+    if not kept_roots:
+        # Fallback: keep the single best-scoring component.
+        if scores:
+            kept_roots = [scores[0][0]]
+    keep_mask = np.isin(roots, np.array(kept_roots, dtype=np.int64))
+    kept = np.sort(cand[keep_mask].astype(np.int64))
+    dbg = {
+        "component_split_radius_m": r,
+        "total_components": int(len(uniq_roots)),
+        "kept_components": int(len(set(kept_roots))),
+        "kept_roots": kept_roots,
+        "top_components": [
+            {"root": r0, "score": float(sc), "good": int(g), "in_bounds": int(inb), "size": int(sz)}
+            for (r0, sc, g, inb, sz) in scores[: min(12, len(scores))]
+        ],
+    }
+    return kept, dbg
+
+
 def selection_xyz_bounds(positions: np.ndarray, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     idx = np.asarray(indices, dtype=np.int64).ravel()
     idx = idx[(idx >= 0) & (idx < positions.shape[0])]

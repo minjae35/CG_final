@@ -25,6 +25,7 @@ python src/pipeline.py mode-b --smoke-3dgs --no-debug-selection --preset desk_je
 python src/pipeline.py mode-b --smoke-3dgs --preset footrest_sand --no-debug-selection
 python src/pipeline.py mode-b --smoke-3dgs --preset footrest_sand
 python src/pipeline.py mode-b --smoke-3dgs --preset footrest_sand --no-reuse-selection
+python src/pipeline.py mode-b --smoke-3dgs --preset footrest_sand --reuse-selection --no-debug-selection
 # 내부적으로 자동으로 아래를 사용함.
 # prompt = "blue armchair in the back center"
 # physics_type = "sand"

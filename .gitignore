@@ -1,5 +1,6 @@
 # Pipeline outputs: 3DGS, renders, simulation, etc.
 text-guided-3d-editor/output/
+submission_cleanup_backup/
 
 # Mip-NeRF / COLMAP data stored in-repo
 text-guided-3d-editor/data/

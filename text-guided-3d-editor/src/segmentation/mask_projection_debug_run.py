@@ -56,7 +56,25 @@ def run_mask_projection_debug(
     iters = cfg.scene.training_iterations_low if use_smoke else cfg.scene.training_iterations
     ply_path = model_out / "point_cloud" / f"iteration_{iters}" / "point_cloud.ply"
     if not ply_path.is_file():
-        raise typer.BadParameter(f"Missing {ply_path}; run ``train`` (or ``train --smoke``) first.")
+        # Helpful message: list iterations that actually exist.
+        pc_dir = model_out / "point_cloud"
+        found: list[int] = []
+        if pc_dir.is_dir():
+            for p in pc_dir.iterdir():
+                if p.is_dir() and p.name.startswith("iteration_"):
+                    try:
+                        found.append(int(p.name.split("_", 1)[1]))
+                    except Exception:
+                        pass
+        found = sorted(set(found))
+        raise typer.BadParameter(
+            "Missing base-scene checkpoint for mask→3D projection debug.\n"
+            f" - base scene: {model_out}\n"
+            f" - expected iteration: {iters}\n"
+            f" - missing path: {ply_path}\n"
+            f" - found iterations: {found if found else '[]'}\n"
+            "Run ``train`` (full) or ``train --smoke`` and/or update scene.model_output_full/smoke + iterations."
+        )
 
     mode_b_out = mode_b_out or (cfg.resolve(cfg.paths.sim_output) / "mode_b_jelly")
     out = mode_b_out / "debug_selection"

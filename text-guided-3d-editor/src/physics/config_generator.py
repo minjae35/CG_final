@@ -81,6 +81,32 @@ def generate_phys_config(
     pin_zero_mean_velocity_gs: bool = False,
     mode_b_mpm_displacement_retention: float | None = None,
     mode_b_render_freeze_gaussian_cov: bool = False,
+    mode_b_render_cov_override: str = "none",
+    mode_b_render_cov_override_scope: str = "selected",
+    mode_b_render_tiny_splats_var: float = 1.0e-6,
+    mode_b_render_cov_diag_min: float = 1.0e-6,
+    mode_b_render_cov_diag_max: float = 5.0e-3,
+    mode_b_disp_propagation_enabled: bool = False,
+    mode_b_disp_propagation_k: int = 8,
+    mode_b_disp_low_percentile: float = 10.0,
+    mode_b_disp_min_neighbor_moved_m: float = 0.05,
+    mode_b_disp_propagation_alpha: float = 1.0,
+    mode_b_save_selected_means3d_per_frame: bool = False,
+    mode_b_debug_dump_selected_only_renders: bool = False,
+    mode_b_extra_render_dump_variants: str = "all",
+    mode_b_sand_render_override: bool = False,
+    mode_b_sand_opacity_scale: float = 1.0,
+    mode_b_sand_opacity_min: float = 0.05,
+    mode_b_sand_opacity_max: float = 0.85,
+    mode_b_sand_cov_scale: float = 1.0,
+    mode_b_sand_color_override_rgb: list[float] | None = None,
+    mode_b_sand_motion_correction: bool = False,
+    mode_b_sand_motion_alpha: float = 0.65,
+    mode_b_sand_global_dy_percentile: float = 60.0,
+    mode_b_sand_min_dy_as_global_frac: float | None = 0.15,
+    mode_b_sand_extreme_all_selected_down: bool = False,
+    mode_b_sand_extreme_total_down_m: float = 0.60,
+    mode_b_render_gaussian_subset: str = "all",
     mode_b_mpm_kabsch_rigid_strip: bool = False,
     mode_b_mpm_kabsch_elastic_amp: float = 1.0,
     mode_b_mpm_anchor_feet_y_percentile: float | None = None,
@@ -445,6 +471,46 @@ def generate_phys_config(
         base["mode_b_mpm_displacement_retention"] = float(mode_b_mpm_displacement_retention)
     if mode_b_render_freeze_gaussian_cov:
         base["mode_b_render_freeze_gaussian_cov"] = True
+    # Render-space artifact checks (consumed by main-repo shim).
+    if isinstance(mode_b_render_cov_override, str) and mode_b_render_cov_override != "none":
+        base["mode_b_render_cov_override"] = str(mode_b_render_cov_override)
+        base["mode_b_render_cov_override_scope"] = str(mode_b_render_cov_override_scope)
+        base["mode_b_render_tiny_splats_var"] = float(mode_b_render_tiny_splats_var)
+        base["mode_b_render_cov_diag_min"] = float(mode_b_render_cov_diag_min)
+        base["mode_b_render_cov_diag_max"] = float(mode_b_render_cov_diag_max)
+    if bool(mode_b_disp_propagation_enabled):
+        base["mode_b_disp_propagation_enabled"] = True
+        base["mode_b_disp_propagation_k"] = int(mode_b_disp_propagation_k)
+        base["mode_b_disp_low_percentile"] = float(mode_b_disp_low_percentile)
+        base["mode_b_disp_min_neighbor_moved_m"] = float(mode_b_disp_min_neighbor_moved_m)
+        base["mode_b_disp_propagation_alpha"] = float(mode_b_disp_propagation_alpha)
+    if bool(mode_b_save_selected_means3d_per_frame):
+        base["mode_b_save_selected_means3d_per_frame"] = True
+    if bool(mode_b_debug_dump_selected_only_renders):
+        base["mode_b_debug_dump_selected_only_renders"] = True
+        if isinstance(mode_b_extra_render_dump_variants, str) and mode_b_extra_render_dump_variants != "all":
+            base["mode_b_extra_render_dump_variants"] = str(mode_b_extra_render_dump_variants)
+    # Sand render override knobs are consumed by the main-repo shim (no submodule edits).
+    if bool(mode_b_sand_render_override):
+        base["mode_b_sand_render_override"] = True
+        base["mode_b_sand_opacity_scale"] = float(mode_b_sand_opacity_scale)
+        base["mode_b_sand_opacity_min"] = float(mode_b_sand_opacity_min)
+        base["mode_b_sand_opacity_max"] = float(mode_b_sand_opacity_max)
+        base["mode_b_sand_cov_scale"] = float(mode_b_sand_cov_scale)
+        if mode_b_sand_color_override_rgb is not None:
+            base["mode_b_sand_color_override_rgb"] = [float(x) for x in mode_b_sand_color_override_rgb[:3]]
+    # Sand motion correction knobs are also consumed by the shim (means3D-only render-time correction).
+    if bool(mode_b_sand_motion_correction):
+        base["mode_b_sand_motion_correction"] = True
+        base["mode_b_sand_motion_alpha"] = float(mode_b_sand_motion_alpha)
+        base["mode_b_sand_global_dy_percentile"] = float(mode_b_sand_global_dy_percentile)
+        if mode_b_sand_min_dy_as_global_frac is not None:
+            base["mode_b_sand_min_dy_as_global_frac"] = float(mode_b_sand_min_dy_as_global_frac)
+    if bool(mode_b_sand_extreme_all_selected_down):
+        base["mode_b_sand_extreme_all_selected_down"] = True
+        base["mode_b_sand_extreme_total_down_m"] = float(mode_b_sand_extreme_total_down_m)
+    if isinstance(mode_b_render_gaussian_subset, str) and mode_b_render_gaussian_subset != "all":
+        base["mode_b_render_gaussian_subset"] = str(mode_b_render_gaussian_subset)
     if mode_b_mpm_kabsch_rigid_strip:
         base["mode_b_mpm_kabsch_rigid_strip"] = True
         base["mode_b_mpm_kabsch_elastic_amp"] = float(mode_b_mpm_kabsch_elastic_amp)
