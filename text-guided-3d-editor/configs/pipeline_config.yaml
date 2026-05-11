@@ -68,15 +68,11 @@ mode_b_presets:
       mode_b_cc_mask_score_min: 0.01
       mode_b_cc_max_components: 8
       mode_b_selection_completion_enabled: true
-      mode_b_selection_completion_aabb_expand_ratio: 0.12
+      mode_b_selection_completion_aabb_expand_ratio: 0.18
       mode_b_selection_completion_max_add: 25000
-      mode_b_selection_completion_mask_dilate_px: 5
-      mode_b_selection_completion_neighbor_radius_m: 0.24
-      mode_b_selection_prune_enabled: true
-      mode_b_selection_prune_neighbor_radius_m: 0.22
-      mode_b_selection_prune_mask_dilate_px: 2
-      mode_b_selection_prune_depth_abs_m: 0.04
-      mode_b_selection_prune_depth_rel: 0.03
+      mode_b_selection_completion_mask_dilate_px: 10
+      mode_b_selection_completion_neighbor_radius_m: 0.40
+      mode_b_selection_prune_enabled: false
 
   footrest_sand_disp_prop:
     selection_prompt: "blue armchair in the back center"
