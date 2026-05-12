@@ -18,11 +18,8 @@ text-guided-3d-editor/submodules/Grounded-SAM-2/gdino_checkpoints/
 # Documents
 documents/
 
-# CLAUDE.md
-CLAUDE.md
-
-# AGENTS.md
-AGENTS.md
+# Claude
+.claude/
 
 # Python bytecode
 __pycache__/
