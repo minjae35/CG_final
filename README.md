@@ -10,7 +10,7 @@ This repository contains a text-guided indoor 3D editing pipeline for COMS3168 D
 
 ---
 
-Pipeline:
+**Pipeline**:
 
 ```text
 Mip-NeRF 360 room data + COLMAP -> 3D Gaussian Splatting base scene
