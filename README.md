@@ -8,6 +8,14 @@ This repository contains a text-guided indoor 3D editing pipeline for COMS3168 D
 | :--- |
 | For a **directory tree** and short **notes on what each major folder does**, open **[about: Code structure on Notion](https://regal-tomato-67b.notion.site/about-Code-structure-35f183b9bcdc800e8d4fd3a7ea8e0d76?source=copy_link)**. |
 
+<table>
+<tbody>
+<tr><td><strong>Final report</strong> – <a href="https://drive.google.com/file/d/1mRwYNZVW6xtlWn1rrQ6t6Z-GqhjFny_B/view?usp=sharing">Google Drive link</a></td></tr>
+<tr><td><strong>Project poster</strong> - <a href="https://drive.google.com/file/d/1_3FS-H2I-KMU_D1sA2VV95s_OgfnRLd6/view?usp=sharing">Google Drive link</a></td></tr>
+<tr><td><strong>Demo video</strong> — <a href="https://drive.google.com/drive/folders/1xkxrKRifPMdOvlIiuX7t776YjjkO9d3m?usp=sharing">Google Drive link</a></td></tr>
+</tbody>
+</table>
+
 ---
 
 **Pipeline**:
