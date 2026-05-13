@@ -2,6 +2,14 @@
 
 This repository contains a text-guided indoor 3D editing pipeline for COMS3168 Deep Learning for Computer Graphics.
 
+---
+
+| <mark>Start here</mark> — **code structure** |
+| :--- |
+| For a **directory tree** and short **notes on what each major folder does**, open **[about: Code structure on Notion](https://regal-tomato-67b.notion.site/about-Code-structure-35f183b9bcdc800e8d4fd3a7ea8e0d76?source=copy_link)**. |
+
+---
+
 Pipeline:
 
 ```text
@@ -94,6 +102,36 @@ conda activate cg_final
 export PYTHONPATH=src
 ```
 
+## Pre-trained base scenes (recommended; Google Drive `Pretrained_3DGS/`)
+
+This is the **default path for instructors and TAs**: it avoids a long 3DGS `train` run while still matching the Mode A / Mode B commands in this README (with the correct `--smoke` / `--smoke-3dgs` flags).
+
+Training `train` from scratch is slow, so we ship **pre-built base checkpoints** outside Git.
+
+1. Open the shared Google Drive folder **`Pretrained_3DGS/`** (URL in the final submission / course materials) and download both archives:
+
+   - `base_scene_smoke.tar.gz` — low-iteration run (`iteration_8000`), matches the `--smoke` / `--smoke-3dgs` examples below.
+   - `base_scene_full.tar.gz` — full run (`iteration_30000`), matches non-smoke `train` and commands without `--smoke`.
+
+2. Place the archives under `text-guided-3d-editor/output/` (create `output/` if needed), then extract:
+
+```bash
+cd /home/bgh1225/CG_final/text-guided-3d-editor/output
+tar -xzf base_scene_smoke.tar.gz
+tar -xzf base_scene_full.tar.gz
+```
+
+3. After extraction you should have:
+
+   - `output/base_scene_smoke/point_cloud/iteration_8000/point_cloud.ply` (and the rest of that run directory).
+   - `output/base_scene_full/point_cloud/iteration_30000/point_cloud.ply` (and the rest of that run directory).
+
+4. **Skip `python src/pipeline.py train ...`** for the bundle you installed. When running Mode A / Mode B, keep flags consistent: use `--smoke` / `--smoke-3dgs` only if you rely on **`base_scene_smoke`**; omit smoke flags if you rely only on **`base_scene_full`**.
+
+**Still required:** `prepare-dataset` (or an existing `room` scene at your config’s `data_root`) if you need `images/` and COLMAP `sparse/` for view rendering or Mode B selection; `bash scripts/download_checkpoints.sh` for Grounding DINO + SAM 2. The Drive archives replace **only** the long **3DGS `train`** step, not data or segmentation weights.
+
+**From scratch instead:** If you want to **download the Mip-NeRF dataset and run `train` yourself**, follow **Data and Checkpoints** and **Train Base 3DGS Scene** in the next sections.
+
 ## Data and Checkpoints
 
 The default config downloads the Mip-NeRF 360 `room` scene into `text-guided-3d-editor/data/mipnerf360/room/`.
@@ -124,6 +162,8 @@ Expected checkpoint files:
 - `submodules/Grounded-SAM-2/checkpoints/sam2.1_hiera_large.pt`
 
 ## Train Base 3DGS Scene
+
+Use this section only if you are **not** using the pre-trained `output/base_scene_*` trees from **Pre-trained base scenes** above.
 
 The Mode A and Mode B commands below use the smoke 3DGS checkpoint, which is faster and writes iteration `8000`.
 
@@ -250,7 +290,7 @@ pytest tests/ -q
 ## Troubleshooting
 
 - Empty submodule folders: run `git submodule update --init --recursive` from `/home/bgh1225/CG_final`.
-- Missing base-scene checkpoint: run `python src/pipeline.py prepare-dataset`, then `python src/pipeline.py train --smoke`. The commands above expect `output/base_scene_smoke/point_cloud/iteration_8000/point_cloud.ply`.
+- Missing base-scene checkpoint: either extract **`Pretrained_3DGS/`** archives into `output/` (see **Pre-trained base scenes** above), or run `python src/pipeline.py prepare-dataset`, then `python src/pipeline.py train --smoke`. Smoke examples expect `output/base_scene_smoke/point_cloud/iteration_8000/point_cloud.ply`.
 - Missing Grounding DINO or SAM 2 weights: run `bash scripts/download_checkpoints.sh` from `text-guided-3d-editor/`.
 - `ImportError: libc10.so` while using GroundingDINO CUDA ops: run:
 
@@ -276,5 +316,6 @@ Not pushed to git:
 - `text-guided-3d-editor/data/`
 - Grounding DINO and SAM 2 checkpoint files under `text-guided-3d-editor/submodules/Grounded-SAM-2/`
 - local caches and generated artifacts listed in `.gitignore`
+- Pre-trained 3DGS base runs (`base_scene_smoke.tar.gz`, `base_scene_full.tar.gz`): distributed separately in Google Drive folder **`Pretrained_3DGS/`** (see **Pre-trained base scenes** above).
 
 You do not need push access to the upstream submodule repositories to use this project. `git submodule update --init --recursive` only downloads the pinned commits.

@@ -21,6 +21,9 @@ documents/
 # Claude
 .claude/
 
+# Cursor IDE local settings
+.cursor/
+
 # Python bytecode
 __pycache__/
 *.pyc
@@ -38,5 +41,4 @@ __pycache__/
 *.lof
 *.lot
 
-# Cursor IDE local settings
-.cursor/
+
