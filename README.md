@@ -4,7 +4,7 @@ This repository contains a text-guided indoor 3D editing pipeline for COMS3168 D
 
 ---
 
-| <mark>Start here — **code structure**</mark> |
+| <mark>Start here</mark> — **code structure** |
 | :--- |
 | For a **directory tree** and short **notes on what each major folder does**, open **[about: Code structure on Notion](https://regal-tomato-67b.notion.site/about-Code-structure-35f183b9bcdc800e8d4fd3a7ea8e0d76?source=copy_link)**. |
 
