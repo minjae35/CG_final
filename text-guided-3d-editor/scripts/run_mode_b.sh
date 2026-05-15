@@ -1,13 +1,13 @@
-# selection을 처음부터 다시 함 (오래걸림)
+# Recompute selection from scratch (slow).
 python src/pipeline.py mode-b "wooden desk" --smoke --no-reuse-selection --kinematic-wobble
 
 # < kinematic-wobble >
-# PhysicsGaussian MPM이 아니라, Gaussian 위치를 직접 흔드는 방식임.
-# selection을 하지 않고, 기존거를 이용함 (좀 더 빠름)
+# Not PhysGaussian MPM; wobbles Gaussian positions directly.
+# Skips redoing selection and reuses cached selection (faster).
 python src/pipeline.py mode-b "wooden table in the foreground." \
   --smoke --kinematic-wobble
 
-# 모든 것을 full로 하고 싶으면?
+# Want everything at full quality?
 conda activate cg_final
 cd text-guided-3d-editor
 export PYTHONPATH=src
@@ -16,23 +16,26 @@ python src/pipeline.py mode-b "wooden table in the foreground" --no-debug-select
 # ===================================================================================================
 ### < preset >
 ### < wooden desk in the forefront > - Kinematic wobble 
-# 3DGS만 smoke, 물리/영상은 full로 하고 싶으면? (Mode-b "wooden desk in the forefront" – Jelly Physics)
+# Only 3DGS smoke, but physics/video at full settings?
 python src/pipeline.py mode-b --smoke-3dgs --preset desk_jelly --no-debug-selection
-# 내부적으로 자동으로 아래를 사용함.
-# prompt = "wooden desk in the forefront"
-# physics_type = "jelly"
-# output = output/sim_results/mode_b_jelly
+: <<'TAG'
+Internally the preset uses the following.
+prompt = "wooden desk in the forefront"
+physics_type = "jelly"
+output = output/sim_results/mode_b_jelly
+TAG
 
 ### < blue armchair in the back center > - Kinematic wobble
-# 3DGS만 smoke, 물리/영상은 full로 하고 싶으면? (Mode-b "blue armchair in the back center" – Sand Physics)
+# Only 3DGS smoke, but physics/video at full settings?
 python src/pipeline.py mode-b --smoke-3dgs --preset armchair_jelly --no-debug-selection
 python src/pipeline.py mode-b --smoke-3dgs --preset armchair_jelly
 python src/pipeline.py mode-b --smoke-3dgs --preset armchair_jelly --no-reuse-selection
 python src/pipeline.py mode-b --smoke-3dgs --preset armchair_jelly --reuse-selection --no-debug-selection
-# 내부적으로 자동으로 아래를 사용함.
-# prompt = "blue armchair in the back center"
-# physics_type = "jelly"
-# output = output/sim_results/mode_b_sand
-
+: <<'TAG'
+Internally the preset uses the following.
+prompt = "blue armchair in the back center"
+physics_type = "jelly"
+output = output/sim_results/mode_b_sand
+TAG
 
 # ============================================================================================
