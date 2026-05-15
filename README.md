@@ -39,14 +39,14 @@ Copy-paste commands for **Mode A** and **Mode B** are in **[Run Mode A](#run-mod
 
 <table>
   <tr>
-    <td align="center"><img src="/home/bgh1225/CG_final/assets/1.png" width="280" alt="3DGS-rendered room scene" /></td>
-    <td align="center"><img src="/home/bgh1225/CG_final/assets/2.png" width="280" alt="Clean editing baseline" /></td>
-    <td align="center"><img src="/home/bgh1225/CG_final/assets/3.png" width="280" alt="DreamGaussian duck for Mode A" /></td>
+    <td align="center"><img src="assets/1.png" width="280" alt="3DGS-rendered room scene" /></td>
+    <td align="center"><img src="assets/2.png" width="280" alt="Clean editing baseline" /></td>
+    <td align="center"><img src="assets/3.png" width="280" alt="DreamGaussian duck for Mode A" /></td>
   </tr>
   <tr>
-    <td align="center"><img src="/home/bgh1225/CG_final/assets/4.png" width="280" alt="Duck merged into base scene (Mode A)" /></td>
-    <td align="center"><img src="/home/bgh1225/CG_final/assets/5.png" width="280" alt="Grounded SAM 2 selection on desk (Mode B)" /></td>
-    <td align="center"><img src="/home/bgh1225/CG_final/assets/6.png" width="280" alt="Grounded SAM 2 selection on armchair (Mode B)" /></td>
+    <td align="center"><img src="assets/4.png" width="280" alt="Duck merged into base scene (Mode A)" /></td>
+    <td align="center"><img src="assets/5.png" width="280" alt="Grounded SAM 2 selection on desk (Mode B)" /></td>
+    <td align="center"><img src="assets/6.png" width="280" alt="Grounded SAM 2 selection on armchair (Mode B)" /></td>
   </tr>
 </table>
 
@@ -232,7 +232,7 @@ Use the same smoke/full choice consistently when running later commands.
 
 The **Run Mode A** examples below reuse a pre-generated yellow duck Gaussian PLY via **`--object-gaussians`**. That asset lives under `output/generated_objects/` and is **not** committed to git. To match the README commands without running DreamGaussian first, use our Drive bundle:
 
-1. Open the shared Google Drive folder [**`Generated_objects/`**](https://drive.google.com/drive/folders/1GURei8bgnKKj-pTkB_UX_f8sQ8BzHsJF?usp=sharing) and download **`generated_objects.tar.gz`** (required for the `--object-gaussians` examples below). The same folder also has optional **`merged_scenes.tar.gz`** — see **Optional: pre-merged Mode A scene** below.
+1. Open the shared Google Drive folder [**`Generated_objects, Merged_scenes/`**](https://drive.google.com/drive/folders/1GURei8bgnKKj-pTkB_UX_f8sQ8BzHsJF?usp=sharing) and download **`generated_objects.tar.gz`** (required for the `--object-gaussians` examples below). The same folder also has optional **`merged_scenes.tar.gz`** — see **Optional: pre-merged Mode A scene** below.
 2. Place the archive under `/home/bgh1225/text-guided-3d-editor/output/` (create `output/` if needed), then extract:
 
 ```bash
@@ -250,7 +250,7 @@ tar -xzf generated_objects.tar.gz
 
 ## Optional: pre-merged Mode A scene (`merged_scenes.tar.gz`)
 
-The same Google Drive folder [**`Generated_objects/`**](https://drive.google.com/drive/folders/1GURei8bgnKKj-pTkB_UX_f8sQ8BzHsJF?usp=sharing) also hosts **`merged_scenes.tar.gz`** — a snapshot of `output/merged_scenes/` (room + inserted duck merge and PhysGaussian staging files). **Not required:** a normal **Run Mode A** command rebuilds `mode_a_merged.ply` each time. Use this bundle if you want the exact merged tree without re-running the merge step, or for inspection.
+The same Google Drive folder [**`Generated_objects, Merged_scenes/`**](https://drive.google.com/drive/folders/1GURei8bgnKKj-pTkB_UX_f8sQ8BzHsJF?usp=sharing) also hosts **`merged_scenes.tar.gz`** — a snapshot of `output/merged_scenes/` (room + inserted duck merge and PhysGaussian staging files). **Not required:** a normal **Run Mode A** command rebuilds `mode_a_merged.ply` each time. Use this bundle if you want the exact merged tree without re-running the merge step, or for inspection.
 
 1. From that Drive folder, download **`merged_scenes.tar.gz`**.
 2. Place the archive under `/home/bgh1225/text-guided-3d-editor/output/` (create `output/` if needed), then extract:
@@ -285,9 +285,9 @@ python src/pipeline.py mode-a "yellow rubber duck" --smoke --full-sds \
   --material metal --in-place-wobble --no-auto-realism
 ```
 
-**Example output (metal):** `text-guided-3d-editor/output/sim_results/mode_a_metal/video/demo.gif` (local path after a successful run; `output/` is not in git).
+**Example output (metal):** `assets/mode_a_metal.gif` (preview; after a run, the pipeline also writes `text-guided-3d-editor/output/sim_results/mode_a_metal/video/demo.gif` under gitignored `output/`).
 
-<img src="text-guided-3d-editor/output/sim_results/mode_a_metal/video/demo.gif" width="400" alt="Mode A metal demo" />
+<img src="assets/mode_a_metal.gif" width="400" alt="Mode A metal demo" />
 
 ### How to run `mode-a` (jelly)
 
@@ -304,9 +304,9 @@ python src/pipeline.py mode-a "yellow rubber duck" --smoke --full-sds \
   --wobble-amp 0.095 --wobble-frequency 0.65 --wobble-height-weight 0.25 --wobble-bottom-pin 0.15
 ```
 
-**Example output (jelly):** `text-guided-3d-editor/output/sim_results/mode_a_jelly/video/demo.gif` (local path after a successful run; `output/` is not in git).
+**Example output (jelly):** `assets/mode_a_jelly.gif` (preview; after a run, the pipeline also writes `text-guided-3d-editor/output/sim_results/mode_a_jelly/video/demo.gif` under gitignored `output/`).
 
-<img src="text-guided-3d-editor/output/sim_results/mode_a_jelly/video/demo.gif" width="400" alt="Mode A jelly demo" />
+<img src="assets/mode_a_jelly.gif" width="400" alt="Mode A jelly demo" />
 
 ### How to run `mode-a` (sand)
 
@@ -322,9 +322,9 @@ python src/pipeline.py mode-a "yellow rubber duck" --smoke --full-sds \
   --material sand --no-auto-realism
 ```
 
-**Example output (sand):** `text-guided-3d-editor/output/sim_results/mode_a_sand/video/demo.gif` (local path after a successful run; `output/` is not in git).
+**Example output (sand):** `assets/mode_a_sand.gif` (preview; after a run, the pipeline also writes `text-guided-3d-editor/output/sim_results/mode_a_sand/video/demo.gif` under gitignored `output/`).
 
-<img src="text-guided-3d-editor/output/sim_results/mode_a_sand/video/demo.gif" width="400" alt="Mode A sand demo" />
+<img src="assets/mode_a_sand.gif" width="400" alt="Mode A sand demo" />
 
 ### How to run `mode-a` (foam)
 
@@ -340,9 +340,9 @@ python src/pipeline.py mode-a "yellow rubber duck" --smoke --full-sds \
   --material foam --no-auto-realism
 ```
 
-**Example output (foam):** `text-guided-3d-editor/output/sim_results/mode_a_foam/video/demo.gif` (local path after a successful run; `output/` is not in git).
+**Example output (foam):** `assets/mode_a_foam.gif` (preview; after a run, the pipeline also writes `text-guided-3d-editor/output/sim_results/mode_a_foam/video/demo.gif` under gitignored `output/`).
 
-<img src="text-guided-3d-editor/output/sim_results/mode_a_foam/video/demo.gif" width="400" alt="Mode A foam demo" />
+<img src="assets/mode_a_foam.gif" width="400" alt="Mode A foam demo" />
 
 ### Expected outputs (Mode A)
 
@@ -373,9 +373,9 @@ export PYTHONPATH=src
 python src/pipeline.py mode-b --smoke-3dgs --preset desk_jelly --no-debug-selection
 ```
 
-**Example output (desk jelly):** `text-guided-3d-editor/output/sim_results/mode_b_desk_jelly/video/demo.gif` (local path after a successful run; `output/` is not in git).
+**Example output (desk jelly):** `assets/mode_b_desk_jelly.gif` (preview; after a run, the pipeline also writes `text-guided-3d-editor/output/sim_results/mode_b_desk_jelly/video/demo.gif` under gitignored `output/`).
 
-<img src="text-guided-3d-editor/output/sim_results/mode_b_desk_jelly/video/demo.gif" width="400" alt="Mode B desk jelly demo" />
+<img src="assets/mode_b_desk_jelly.gif" width="400" alt="Mode B desk jelly demo" />
 
 **Output directory:** `/home/bgh1225/text-guided-3d-editor/output/sim_results/mode_b_desk_jelly/` (main clip is typically **`video/output.mp4`** under that folder).
 
@@ -387,9 +387,9 @@ Same `cd` / `conda activate` / `export PYTHONPATH=src` as **desk jelly** above, 
 python src/pipeline.py mode-b --smoke-3dgs --preset armchair_jelly --no-debug-selection
 ```
 
-**Example output (armchair jelly):** `text-guided-3d-editor/output/sim_results/mode_b_armchair_jelly/video/demo.gif` (local path after a successful run; `output/` is not in git).
+**Example output (armchair jelly):** `assets/mode_b_armchair_jelly.gif` (preview; after a run, the pipeline also writes `text-guided-3d-editor/output/sim_results/mode_b_armchair_jelly/video/demo.gif` under gitignored `output/`).
 
-<img src="text-guided-3d-editor/output/sim_results/mode_b_armchair_jelly/video/demo.gif" width="400" alt="Mode B armchair jelly demo" />
+<img src="assets/mode_b_armchair_jelly.gif" width="400" alt="Mode B armchair jelly demo" />
 
 **Output directory:** `/home/bgh1225/text-guided-3d-editor/output/sim_results/mode_b_armchair_jelly/` (main clip is typically **`video/output.mp4`** under that folder).
 
